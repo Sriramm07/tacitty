@@ -1,10 +1,10 @@
-# Maintainer: (fill in)
+# Maintainer: Sriram P <sriram_297 at yahoo dot com>
 pkgname=tacitty
 pkgver=0.1.0
 pkgrel=1
 pkgdesc="Prompt-aware password alias injector for Linux terminals"
 arch=('x86_64' 'aarch64')
-url="https://github.com/example/tacitty"
+url="https://github.com/Sriramm07/tacitty"
 license=('LicenseRef-PolyForm-Noncommercial-1.0.0')
 depends=('gcc-libs')
 makedepends=('cargo')
@@ -12,8 +12,8 @@ optdepends=(
     'pass: use the pass(1) password store as a backend'
     'libsecret: use the Secret Service (GNOME Keyring/KWallet) backend'
 )
-source=("$pkgname-$pkgver.tar.gz")
-sha256sums=('SKIP') # replace with the real tarball checksum at release time
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP') # replace with `updpkgsums` output once v$pkgver is tagged
 
 prepare() {
     cd "$pkgname-$pkgver"

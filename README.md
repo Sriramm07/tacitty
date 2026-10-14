@@ -68,15 +68,19 @@ curl -fsSL https://raw.githubusercontent.com/Sriramm07/tacitty/main/install.sh |
 Set `TACITTY_VERSION=v0.1.0` to install a specific release, or
 `TACITTY_INSTALL_DIR=/some/dir` to install somewhere else.
 
-Other options:
+It's a single static binary with no dependencies, so it runs on any
+Linux distribution. To install by hand instead, download
+`tacitty-<version>-<arch>-unknown-linux-musl.tar.gz` from the
+[latest release](https://github.com/Sriramm07/tacitty/releases/latest),
+check it against its `.sha256` file, and put the `tacitty` binary anywhere
+on your `PATH`.
 
-- **Debian / Ubuntu:** download the `.deb` for your architecture from the
-  [latest release](https://github.com/Sriramm07/tacitty/releases/latest),
-  then run `sudo apt install ./tacitty_*.deb`.
-- **Manual:** download `tacitty-<version>-<arch>-unknown-linux-musl.tar.gz`
-  from the release page, check it against its `.sha256` file, and put the
-  `tacitty` binary anywhere on your `PATH`.
-- **From source:** see [Building from source](#building-from-source).
+To update later, run `tacitty update` (or `tacitty update --check` to only
+see whether a newer version exists). It downloads the latest release,
+verifies its checksum, makes sure the new binary runs, and only then
+replaces the old one.
+
+To build it yourself instead, see [Building from source](#building-from-source).
 
 ## Setup
 
@@ -125,6 +129,7 @@ limitations" note below on why.
 tacitty init [--no-autostart]     create the native vault, set the master passphrase,
                                   and enable auto-start
 tacitty enable | disable          turn auto-start in new terminals on / off
+tacitty update [--check]          update to the latest release (or just check)
 tacitty add <alias>               read a secret from /dev/tty (echo off, confirmed twice)
 tacitty add <alias> --generate [--length N]
 tacitty rm <alias>
@@ -308,12 +313,9 @@ vault-decoder fuzz targets.
 
 - **Releases:** pushing a tag like `v0.1.0` (it must match the version in
   `Cargo.toml`) runs `.github/workflows/release.yml`. It publishes a GitHub
-  Release with static musl tarballs and `.deb` packages for x86_64 and
-  aarch64, each with a `.sha256` file. `install.sh` installs from these.
+  Release with static musl tarballs for x86_64 and aarch64, each with a
+  `.sha256` file. `install.sh` and `tacitty update` install from these.
 - `cargo install --path .` — installs from source into `~/.cargo/bin`.
-- `.deb` metadata is in `Cargo.toml`'s `[package.metadata.deb]`; build with
-  [`cargo-deb`](https://github.com/kornelski/cargo-deb):
-  `cargo deb` (produces `target/debian/tacitty_<version>-1_amd64.deb`).
 - `packaging/PKGBUILD` — Arch Linux / AUR package definition.
 
 ## Non-goals (v1)

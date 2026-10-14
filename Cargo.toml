@@ -29,6 +29,7 @@ regex = "1"
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.151"
+sha2 = "0.10"
 thiserror = "2"
 toml = "0.8"
 vte = "0.15"
@@ -45,16 +46,6 @@ lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
-
-[package.metadata.deb]
-name = "tacitty"
-section = "utils"
-priority = "optional"
-assets = [
-  ["target/release/tacitty", "usr/bin/", "755"],
-  ["README.md", "usr/share/doc/tacitty/README.md", "644"],
-  ["contrib/*", "usr/share/doc/tacitty/contrib/", "644"],
-]
 
 [workspace]
 members = ["."]

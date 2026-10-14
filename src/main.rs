@@ -11,6 +11,7 @@ use tacitty::autostart;
 use tacitty::config::{self, Config};
 use tacitty::secret::SecretBuf;
 use tacitty::sys;
+use tacitty::update;
 use tacitty::vault;
 use tacitty::wrapper::{self, RunOptions};
 
@@ -66,6 +67,12 @@ enum Cmd {
     Enable,
     /// Stop new terminals from starting inside `tacitty shell`.
     Disable,
+    /// Update tacitty to the latest release.
+    Update {
+        /// Only check whether a newer release exists.
+        #[arg(long)]
+        check: bool,
+    },
     /// Run the per-user secret agent (normally started automatically).
     Agent {
         #[arg(long, hide = true)]
@@ -100,6 +107,7 @@ fn main() -> Result<()> {
         Cmd::Shell { autostart, command } => cmd_shell(command, autostart),
         Cmd::Enable => cmd_enable(),
         Cmd::Disable => cmd_disable(),
+        Cmd::Update { check } => cmd_update(check),
         Cmd::Agent {
             foreground_daemonized: _,
         } => cmd_agent(),
@@ -415,6 +423,22 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+fn cmd_update(check: bool) -> Result<i32> {
+    match update::run(check)? {
+        update::Outcome::UpToDate { current } => {
+            println!("tacitty {current} is already the latest version.")
+        }
+        update::Outcome::Available { current, latest } => {
+            println!("tacitty {latest} is available (you have {current}). Run `tacitty update` to install it.")
+        }
+        update::Outcome::Updated { from, to, path } => {
+            println!("Updated tacitty {from} -> {to} at {}.", path.display());
+            println!("New terminals use it right away; already-open ones keep the old version until closed.");
+        }
+    }
+    Ok(0)
 }
 
 fn cmd_get(alias_name: &str, force: bool) -> Result<i32> {

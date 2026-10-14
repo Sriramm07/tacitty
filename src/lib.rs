@@ -10,5 +10,6 @@ pub mod resolver;
 pub mod secret;
 pub mod statemachine;
 pub mod sys;
+pub mod update;
 pub mod vault;
 pub mod wrapper;

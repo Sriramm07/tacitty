@@ -1,9 +1,8 @@
 name: Release
 
-# Push a tag like `v0.1.0` to publish a GitHub Release with:
-#   - static musl binaries (x86_64, aarch64) as .tar.gz + .sha256
-#   - .deb packages (amd64, arm64) + .sha256
-# install.sh at the repo root downloads from these releases.
+# Push a tag like `v0.1.0` to publish a GitHub Release with static musl
+# binaries (x86_64, aarch64) as .tar.gz + .sha256. install.sh and
+# `tacitty update` both download from these releases.
 
 on:
   push:
@@ -39,7 +38,6 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # cargo-deb derives the .deb architecture (amd64/arm64) from the target.
         target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
     steps:
       - uses: actions/checkout@v4
@@ -50,7 +48,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - uses: taiki-e/install-action@cargo-deb
 
       - name: build
         run: cargo build --release --locked --target ${{ matrix.target }}
@@ -63,15 +60,8 @@ jobs:
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
 
-      - name: package .deb
-        run: |
-          cargo deb --no-build --no-strip --target ${{ matrix.target }} -o dist/
-          (cd dist && for f in *.deb; do sha256sum "$f" > "$f.sha256"; done)
-
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*.tar.gz
             dist/*.tar.gz.sha256
-            dist/*.deb
-            dist/*.deb.sha256

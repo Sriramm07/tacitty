@@ -93,15 +93,20 @@ pub fn umask(mask: u32) -> u32 {
 }
 
 /// Fill `buf` from the kernel CSPRNG.
+///
+/// Uses the raw syscall rather than libc's `getrandom()` wrapper: in the
+/// static musl release builds that wrapper resolved to a null pointer and
+/// crashed, and older glibc versions don't have it at all.
 pub fn getrandom(buf: &mut [u8]) -> io::Result<()> {
     let mut off = 0;
     while off < buf.len() {
         // SAFETY: the pointer/length pair describes the unwritten tail of `buf`.
         let n = unsafe {
-            libc::getrandom(
+            libc::syscall(
+                libc::SYS_getrandom,
                 buf[off..].as_mut_ptr() as *mut libc::c_void,
                 buf.len() - off,
-                0,
+                0 as libc::c_uint,
             )
         };
         if n < 0 {

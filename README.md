@@ -55,10 +55,32 @@ principle, misfire on a remote line that isn't really a secret prompt, it
 defaults to asking for a one-key local confirmation before sending anything
 (`remote.mode = "confirm"`; `"auto"` and `"off"` are also available).
 
+## Install
+
+One command installs a prebuilt static binary for x86_64 or ARM64 Linux. It
+downloads the binary from GitHub Releases, verifies its SHA-256 checksum,
+and installs it to `~/.local/bin`, with no root needed:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Sriramm07/tacitty/main/install.sh | sh
+```
+
+Set `TACITTY_VERSION=v0.1.0` to install a specific release, or
+`TACITTY_INSTALL_DIR=/some/dir` to install somewhere else.
+
+Other options:
+
+- **Debian / Ubuntu:** download the `.deb` for your architecture from the
+  [latest release](https://github.com/Sriramm07/tacitty/releases/latest),
+  then run `sudo apt install ./tacitty_*.deb`.
+- **Manual:** download `tacitty-<version>-<arch>-unknown-linux-musl.tar.gz`
+  from the release page, check it against its `.sha256` file, and put the
+  `tacitty` binary anywhere on your `PATH`.
+- **From source:** see [Building from source](#building-from-source).
+
 ## Setup
 
-Build and install (see [Packaging](#packaging) below for prebuilt options),
-then:
+Once installed:
 
 ```sh
 tacitty init
@@ -284,12 +306,15 @@ vault-decoder fuzz targets.
 
 ## Packaging
 
+- **Releases:** pushing a tag like `v0.1.0` (it must match the version in
+  `Cargo.toml`) runs `.github/workflows/release.yml`. It publishes a GitHub
+  Release with static musl tarballs and `.deb` packages for x86_64 and
+  aarch64, each with a `.sha256` file. `install.sh` installs from these.
 - `cargo install --path .` — installs from source into `~/.cargo/bin`.
 - `.deb` metadata is in `Cargo.toml`'s `[package.metadata.deb]`; build with
   [`cargo-deb`](https://github.com/kornelski/cargo-deb):
-  `cargo deb` (produces `target/debian/tacitty_<version>_amd64.deb`).
+  `cargo deb` (produces `target/debian/tacitty_<version>-1_amd64.deb`).
 - `packaging/PKGBUILD` — Arch Linux / AUR package definition.
-- Prebuilt static musl binaries are attached to CI runs (see above).
 
 ## Non-goals (v1)
 

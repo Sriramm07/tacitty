@@ -91,17 +91,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # Installs the target and configures its linker (and qemu for aarch64).
+      - uses: taiki-e/setup-cross-toolchain-action@v1
         with:
-          targets: ${{ matrix.target }}
+          target: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - name: install musl cross tools
-        if: matrix.target == 'aarch64-unknown-linux-musl'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu musl-tools
-      - run: sudo apt-get install -y musl-tools
-        if: matrix.target == 'x86_64-unknown-linux-musl'
-      - run: cargo build --release --target ${{ matrix.target }}
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
           name: tacitty-${{ matrix.target }}

@@ -2,6 +2,9 @@
 name = "tacitty"
 version = "0.1.0"
 edition = "2021"
+authors = ["Sriram P <sriram_297@yahoo.com>"]
+repository = "https://github.com/Sriramm07/tacitty"
+homepage = "https://github.com/Sriramm07/tacitty"
 rust-version = "1.80"
 description = "Prompt-aware password alias injector for Linux terminals: type @alias at any secret prompt and get the real secret from a local encrypted vault"
 license = "PolyForm-Noncommercial-1.0.0"

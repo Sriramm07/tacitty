@@ -1,0 +1,46 @@
+# Maintainer: (fill in)
+pkgname=tacitty
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Prompt-aware password alias injector for Linux terminals"
+arch=('x86_64' 'aarch64')
+url="https://github.com/example/tacitty"
+license=('LicenseRef-PolyForm-Noncommercial-1.0.0')
+depends=('gcc-libs')
+makedepends=('cargo')
+optdepends=(
+    'pass: use the pass(1) password store as a backend'
+    'libsecret: use the Secret Service (GNOME Keyring/KWallet) backend'
+)
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP') # replace with the real tarball checksum at release time
+
+prepare() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release
+}
+
+check() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo test --frozen --release --lib
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+    install -Dm755 "target/release/$pkgname" "$pkgdir/usr/bin/$pkgname"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 contrib/bashrc-snippet.sh \
+        "$pkgdir/usr/share/doc/$pkgname/contrib/bashrc-snippet.sh"
+    install -Dm644 contrib/tacitty.tmux.conf \
+        "$pkgdir/usr/share/doc/$pkgname/contrib/tacitty.tmux.conf"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

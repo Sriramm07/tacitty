@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Speeds up scrypt in tests only; the real vault always uses age's
+  # default (expensive) scrypt parameters. See src/vault.rs.
+  TACITTY_TEST_WORK_FACTOR: "8"
+
+jobs:
+  test:
+    name: build, test, lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy (lib, bin, tests)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: unit tests
+        run: cargo test --lib
+
+      - name: integration tests (real ptys)
+        # Runs the wrapper against real bash/python/sudo-shaped prompts
+        # through an actual pty (see tests/integration.rs). Single-threaded:
+        # each test starts its own agent daemon, and serializing them keeps
+        # CI runners (often 1-2 vCPUs) from hitting the scheduling-jitter
+        # flakiness a bare-metal desktop wouldn't see.
+        run: cargo test --test integration -- --test-threads=1
+
+      - name: doctor smoke test
+        run: |
+          cargo build
+          ./target/debug/tacitty doctor || true
+
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-audit
+      - run: cargo audit
+
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  fuzz-smoke:
+    name: fuzz targets build + short run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "fuzz -> target"
+      - uses: taiki-e/install-action@cargo-fuzz
+      - name: build fuzz targets
+        run: |
+          cargo +nightly fuzz build statemachine
+          cargo +nightly fuzz build alt_screen_tracker
+          cargo +nightly fuzz build vault_decode
+      - name: short timed run (regression check, not a full fuzz campaign)
+        run: |
+          cargo +nightly fuzz run statemachine -- -max_total_time=60
+          cargo +nightly fuzz run alt_screen_tracker -- -max_total_time=60
+          cargo +nightly fuzz run vault_decode -- -max_total_time=60
+
+  release-build:
+    name: release binary (x86_64 + aarch64 musl)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: install musl cross tools
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu musl-tools
+      - run: sudo apt-get install -y musl-tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+      - run: cargo build --release --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tacitty-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/tacitty

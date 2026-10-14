@@ -1,0 +1,49 @@
+# cargo-deny configuration. See https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-unknown-linux-musl",
+]
+
+[advisories]
+version = 2
+ignore = []
+
+[licenses]
+version = 2
+# tacitty itself is PolyForm-Noncommercial-1.0.0 (allowed for it alone via
+# the exception below); these are the licenses its dependency tree is
+# actually allowed to use. Kept to exactly what's currently in the tree
+# (checked via `cargo deny list`) rather than a generous preemptive list, so
+# an unexpected new license shows up as a real CI failure instead of
+# silently matching something already allowed.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.8
+exceptions = [
+    { name = "tacitty", allow = ["PolyForm-Noncommercial-1.0.0"] },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+deny = [
+    # openssl has a much larger attack surface and a history of memory-safety
+    # advisories that age/rustls-style pure-Rust crypto avoids; tacitty has
+    # no reason to ever depend on it, directly or transitively.
+    { name = "openssl" },
+    { name = "openssl-sys" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

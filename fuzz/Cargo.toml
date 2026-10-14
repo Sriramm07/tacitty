@@ -1,0 +1,37 @@
+[package]
+name = "tacitty-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.tacitty]
+path = ".."
+
+[[bin]]
+name = "statemachine"
+path = "fuzz_targets/statemachine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "alt_screen_tracker"
+path = "fuzz_targets/alt_screen_tracker.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vault_decode"
+path = "fuzz_targets/vault_decode.rs"
+test = false
+doc = false
+bench = false

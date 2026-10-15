@@ -241,10 +241,8 @@ fn print_enabled(files: &[std::path::PathBuf]) {
     for f in files {
         println!("Auto-start enabled in {}", f.display());
     }
-    println!(
-        "New terminals now start inside tacitty. Run `tacitty disable` to turn this off, \
-         or set NO_TACITTY=1 to skip it for one shell."
-    );
+    println!("New terminals now start inside tacitty.");
+    println!("Run `tacitty disable` to turn this off (or set NO_TACITTY=1 for one shell).");
 }
 
 fn cmd_enable() -> Result<i32> {

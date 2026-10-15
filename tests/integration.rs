@@ -352,3 +352,82 @@ fn broken_wrapper_falls_back_to_plain_shell() {
     sh.send_line("exit").unwrap();
     sh.exp_eof().unwrap();
 }
+
+/// A stand-in for an interactive `ssh` session: the local pty is raw (as a
+/// real ssh client sets it), and the "remote" prints a password prompt and
+/// reads one line. The script is *named* `ssh` so the foreground-process
+/// allow-list matches it, exactly as it would for the real client.
+fn fake_ssh(env: &Env) -> std::path::PathBuf {
+    let bin = env.home.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let path = bin.join("ssh");
+    // Python (not bash `read`, which misbehaves on a raw tty) reading raw
+    // bytes up to the Enter key, like a remote sshd's pty would deliver.
+    std::fs::write(
+        &path,
+        "#!/usr/bin/python3\n\
+         import os, sys, termios, tty\n\
+         fd = sys.stdin.fileno()\n\
+         old = termios.tcgetattr(fd)\n\
+         tty.setraw(fd)\n\
+         os.write(1, b'Password for user postgres: ')\n\
+         pw = b''\n\
+         while True:\n\
+         \x20   c = os.read(fd, 1)\n\
+         \x20   if c in (b'\\r', b'\\n', b''): break\n\
+         \x20   pw += c\n\
+         termios.tcsetattr(fd, termios.TCSANOW, old)\n\
+         print()\n\
+         print('GOT[' + pw.decode() + ']')\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+#[test]
+fn remote_prompt_sends_secret_without_confirmation_by_default() {
+    let env = setup_with_alias("db", "pg-s3cret");
+    let ssh = fake_ssh(&env);
+    let mut p = env.spawn_shell(15_000);
+    p.send_line(&ssh.display().to_string()).unwrap();
+    p.exp_string("Password for user postgres: ").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    p.send("@db\r").unwrap();
+    p.flush().unwrap();
+    let (before, got) = p.exp_regex(r"GOT\[[^\]]*\]").unwrap();
+    assert_eq!(got, "GOT[pg-s3cret]");
+    assert!(
+        !before.contains("send secret"),
+        "unexpected confirmation: {before:?}"
+    );
+    assert!(!before.contains("pg-s3cret"), "secret leaked: {before:?}");
+    p.send_line("exit").unwrap();
+    p.exp_eof().unwrap();
+}
+
+#[test]
+fn remote_prompt_asks_first_in_confirm_mode() {
+    let env = setup_with_alias("db", "pg-s3cret");
+    let cfg_dir = env.home.join(".config/tacitty");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    std::fs::write(
+        cfg_dir.join("config.toml"),
+        "[remote]\nmode = \"confirm\"\n",
+    )
+    .unwrap();
+    let ssh = fake_ssh(&env);
+    let mut p = env.spawn_shell(15_000);
+    p.send_line(&ssh.display().to_string()).unwrap();
+    p.exp_string("Password for user postgres: ").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    p.send("@db\r").unwrap();
+    p.flush().unwrap();
+    p.exp_string("send secret for @db? [y/N]").unwrap();
+    p.send("y\r").unwrap();
+    p.flush().unwrap();
+    p.exp_string("GOT[pg-s3cret]").unwrap();
+    p.send_line("exit").unwrap();
+    p.exp_eof().unwrap();
+}

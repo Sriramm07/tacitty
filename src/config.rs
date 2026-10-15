@@ -45,7 +45,9 @@ pub struct RemoteConfig {
 impl Default for RemoteConfig {
     fn default() -> Self {
         RemoteConfig {
-            mode: RemoteMode::Confirm,
+            // The user typed the alias themselves at what looks like a
+            // password prompt; asking again is opt-in (`mode = "confirm"`).
+            mode: RemoteMode::Auto,
             processes: [
                 "ssh",
                 "mosh-client",
@@ -247,6 +249,13 @@ mod tests {
     #[test]
     fn defaults_validate() {
         Config::default().validate().unwrap();
+    }
+
+    #[test]
+    fn remote_mode_defaults_to_auto() {
+        assert_eq!(Config::default().remote.mode, RemoteMode::Auto);
+        let c: Config = toml::from_str("[remote]\nprocesses = [\"ssh\"]\n").unwrap();
+        assert_eq!(c.remote.mode, RemoteMode::Auto);
     }
 
     #[test]

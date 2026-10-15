@@ -152,9 +152,12 @@ impl VaultData {
     }
 }
 
-/// Work-factor override for fast tests. Honoured ONLY in debug builds.
+/// Work-factor override for fast tests. Honoured only in unit tests and in
+/// builds with the `test-hooks` feature (used by the integration tests),
+/// never in normal debug or release builds, so a stray environment
+/// variable can't weaken a real vault.
 fn test_work_factor() -> Option<u8> {
-    if cfg!(debug_assertions) {
+    if cfg!(any(test, feature = "test-hooks")) {
         std::env::var("TACITTY_TEST_WORK_FACTOR")
             .ok()
             .and_then(|v| v.parse::<u8>().ok())
@@ -305,8 +308,12 @@ pub fn create(path: &Path, passphrase: &SecretString) -> Result<(), VaultError> 
     save(path, passphrase, &VaultData::new())
 }
 
-/// Validate a secret for storage: non-empty, bounded, and free of bytes that
-/// can never be delivered through a terminal line (`\n`, `\r`, NUL).
+/// Validate a secret for storage or delivery: non-empty, bounded, and free
+/// of control characters (bytes 0x00-0x1F and DEL). Those are interpreted
+/// by the terminal rather than passed through as text: Enter or newline
+/// would submit early, Ctrl-C/Ctrl-U/backspace would corrupt the input, and
+/// Ctrl-Z would suspend the prompt and send the rest of the secret to the
+/// shell instead.
 pub fn validate_secret(secret: &[u8]) -> Result<(), String> {
     if secret.is_empty() {
         return Err("secret is empty".into());
@@ -314,8 +321,10 @@ pub fn validate_secret(secret: &[u8]) -> Result<(), String> {
     if secret.len() > MAX_SECRET_LEN {
         return Err(format!("secret is longer than {MAX_SECRET_LEN} bytes"));
     }
-    if secret.iter().any(|&b| matches!(b, b'\n' | b'\r' | 0)) {
-        return Err("secret must not contain newline, carriage return or NUL".into());
+    if secret.iter().any(|&b| b < 0x20 || b == 0x7f) {
+        return Err(
+            "secret must not contain control characters (tab, newline, Ctrl-keys, DEL)".into(),
+        );
     }
     Ok(())
 }
@@ -424,6 +433,14 @@ mod tests {
         assert!(validate_secret(b"ok pass").is_ok());
         assert!(validate_secret(b"").is_err());
         assert!(validate_secret(b"a\nb").is_err());
+        for bad in [0u8, b'\t', b'\r', 0x03, 0x15, 0x1a, 0x1b, 0x7f] {
+            assert!(
+                validate_secret(&[b'a', bad, b'b']).is_err(),
+                "byte {bad:#x}"
+            );
+        }
+        assert!(validate_secret("pässwörd €".as_bytes()).is_ok());
+        assert!(validate_secret(b"~!@#$%^&*()_+{}|:<>? ").is_ok());
         assert!(validate_secret(&vec![b'a'; MAX_SECRET_LEN + 1]).is_err());
     }
 

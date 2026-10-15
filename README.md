@@ -1,6 +1,8 @@
 <div align="center">
 
-# 🔐 tacitty
+# 🔐 taciTTY
+
+*tacit (unspoken) + TTY (your terminal)*
 
 **Password aliases for your terminal.**<br>
 Type `@proddb` at any password prompt and the real secret is sent instead.
@@ -17,11 +19,11 @@ Type `@proddb` at any password prompt and the real secret is sent instead.
 
 ---
 
-## ✨ Why tacitty?
+## ✨ Why taciTTY?
 
 Long, random passwords are safe but painful to type. Copy-pasting them leaks
 them into clipboard managers, and typing them invites typos and shoulder
-surfers. tacitty lets you type a short, memorable alias instead. It works at
+surfers. taciTTY lets you type a short, memorable alias instead. It works at
 **any** terminal password prompt: `sudo`, `su`, `ssh`, `psql`, `mysql`,
 `gpg`, `read -s`, Python's `getpass` and more.
 
@@ -34,8 +36,8 @@ surfers. tacitty lets you type a short, memorable alias instead. It works at
   global keyboard hooks, and nothing in your shell history or scrollback.
 - 🌐 **Works over SSH too.** Prompts from remote hosts inside `ssh`,
   `mosh`, `docker exec` or `kubectl exec` sessions are recognised as well.
-- ⚡ **Zero setup.** One static binary. `tacitty init` turns it on for every
-  new terminal automatically.
+- ⚡ **Quick to set up.** One static binary. `tacitty init` turns it on for
+  every new terminal automatically.
 
 ## 🚀 Quick start
 
@@ -57,8 +59,9 @@ $ sudo systemctl restart nginx
 [sudo] password for sriram: @proddb⏎     ← nothing is shown; sudo receives the real password
 ```
 
-The first time you use an alias in a session, tacitty asks for your master
-passphrase to unlock the vault.
+If the vault is locked, taciTTY asks for your master passphrase the first
+time you use an alias. It then stays unlocked, for every terminal, until it
+has been idle for 15 minutes.
 
 ## 📦 Install
 
@@ -77,12 +80,21 @@ curl -fsSL https://raw.githubusercontent.com/Sriramm07/tacitty/main/install.sh |
 | By hand | Download `tacitty-<version>-<arch>-unknown-linux-musl.tar.gz` from the release page, check it against its `.sha256`, and put `tacitty` on your `PATH` |
 | From source | See [Building from source](#-development) |
 
-tacitty is a single static binary with no dependencies, so it runs on any
+taciTTY is a single static binary with no dependencies, so it runs on any
 Linux distribution.
 
 **Updating:** run `tacitty update`, or `tacitty update --check` to only see
 whether a newer version exists. It verifies the checksum and makes sure the
 new binary runs before replacing the old one.
+
+**Verifying a download (optional):** every release file comes with a
+build-provenance attestation, signed through GitHub, that proves it was
+built from this repository by its release workflow. With the
+[GitHub CLI](https://cli.github.com):
+
+```sh
+gh attestation verify tacitty-v0.1.0-x86_64-unknown-linux-musl.tar.gz --repo Sriramm07/tacitty
+```
 
 ## 🧭 How it works
 
@@ -95,10 +107,10 @@ new binary runs before replacing the old one.
                      └── is the terminal in "hidden input" mode right now?
 ```
 
-tacitty runs your shell inside a pseudo-terminal it controls. When you start
+taciTTY runs your shell inside a pseudo-terminal it controls. When you start
 typing a line, it checks the terminal's mode. Programs that read passwords
 switch the terminal to **canonical mode with echo off**. That's how the
-password stays hidden while you type it. tacitty only expands `@alias` in
+password stays hidden while you type it. taciTTY only expands `@alias` in
 exactly that mode:
 
 ```
@@ -107,9 +119,7 @@ secret_mode = !(c_lflag & ECHO) && ((c_lflag & ICANON) || (c_lflag & ECHONL))
 
 Editors, pagers and other full-screen programs also turn echo off, but they
 run in **raw** mode, so they never match. That's what keeps `@alias` inert
-everywhere else. The same detection model is used by
-[Ghostty](https://ghostty.org)'s lock indicator and the
-[ghostel](https://github.com/telesoho/ghostel) Emacs terminal.
+everywhere else.
 
 <details>
 <summary><b>Prompts on remote hosts (ssh, mosh, docker, kubectl)</b></summary>
@@ -117,24 +127,31 @@ everywhere else. The same detection model is used by
 
 Inside an interactive `ssh` (or `mosh`, `telnet`, `docker exec -it`,
 `kubectl exec -it`) session, your *local* terminal is in raw mode, so the
-check above can't see the remote host's prompt. As a fallback, tacitty
-watches the output. If the program in the foreground is on an allow-list,
-and the current line looks like a password prompt (default regex:
-`(password|passphrase|passcode|pin)...:\s*$`), it treats `@alias` there as a
-password too.
+check above can't see the remote host's prompt. As a fallback, taciTTY
+watches the output. It treats `@alias` as a password only when **all** of
+these hold:
 
-By default (`remote.mode = "auto"`) the secret is sent straight away. This
-fallback is a heuristic: if a remote line looks like a prompt but the remote
-program is actually showing what you type, the secret would be visible
-there. To be asked `send secret for @alias? [y/N]` first, set
+- the program in the foreground is on an allow-list (`ssh`, `mosh-client`,
+  `telnet`, `docker`, `kubectl`, `podman`);
+- your local terminal is not showing what you type (so commands like
+  `ssh host 'sudo -S ...'`, `ssh -T` or `kubectl exec -i` without `-t`, where
+  it would be, never qualify);
+- the current output line ends like a password prompt (default:
+  `password`, `passphrase`, `passcode` or `pin` as a whole word, then `:`).
+
+By default (`remote.mode = "auto"`) the secret is then sent straight away.
+This is still a heuristic: if a remote program prints something that looks
+like a password prompt but actually shows what you type, the secret would
+be visible there. To be asked `send secret for @alias? [y/N]` first, set
 `remote.mode = "confirm"`. To turn the fallback off, set `"off"`.
 
 </details>
 
 ## ⚙️ Auto-start
 
-`tacitty init` makes every new interactive terminal start inside tacitty:
-new tabs and windows, after a reboot, and SSH logins to this machine. It:
+`tacitty init` makes every new interactive terminal start inside taciTTY:
+new tabs and windows, after a reboot, and interactive SSH logins to this
+machine. It:
 
 - copies the binary to `~/.local/bin/tacitty` (skipped for installs under
   `/usr` or `/opt`), so it keeps working if the downloaded file is moved;
@@ -142,8 +159,8 @@ new tabs and windows, after a reboot, and SSH logins to this machine. It:
   `~/.zshrc`.
 
 Your login shell is **not** changed. Scripts, `scp`, cron jobs and
-`ssh host cmd` never go through tacitty, because the hook only runs for
-interactive terminals. If tacitty fails to start, for example because of a
+`ssh host cmd` never go through taciTTY, because the hook only runs for
+interactive terminals. If taciTTY fails to start, for example because of a
 bad config file, you get your normal shell with a warning, so it can never
 lock you out.
 
@@ -171,7 +188,7 @@ lock you out.
 | `tacitty mv <old> <new>` | Rename an alias |
 | `tacitty ls` | List aliases and dates (never secrets) |
 | `tacitty get <alias> [--force]` | Print a secret to stdout (refuses a terminal without `--force`) |
-| `tacitty shell [-- <cmd> ...]` | Run your shell (or `<cmd>`) inside tacitty |
+| `tacitty shell [-- <cmd> ...]` | Run your shell (or `<cmd>`) inside taciTTY |
 | `tacitty enable` / `disable` | Turn auto-start on or off |
 | `tacitty lock` / `unlock` / `status` | Lock, unlock or check the vault |
 | `tacitty update [--check]` | Update to the latest release |
@@ -196,7 +213,7 @@ title_indicator = true      # show "tacitty: secret prompt" in the window title
 [remote]
 mode = "auto"               # auto | confirm | off
 processes = ["ssh", "mosh-client", "telnet", "docker", "kubectl", "podman"]
-prompt_regex = '(?i)(password|passphrase|passcode|pin)[^\n]*:\s*$'
+prompt_regex = '(?i)\b(password|passphrase|passcode|pin)\b[^\n]*:\s*$'
 
 [pass]
 prefix = "tacitty"
@@ -226,28 +243,38 @@ none); expanding an alias into the wrong program; secrets ending up in
 logs, core dumps, swap or terminal scrollback.
 
 **Out of scope:** a compromised root account; malicious software running as
-your own user that can attach a debugger to tacitty (made harder, but not
+your own user that can attach a debugger to taciTTY (made harder, but not
 prevented); someone who can overwrite the vault or config files.
 
 <details>
-<summary><b>What tacitty does about it</b></summary>
+<summary><b>What taciTTY does about it</b></summary>
 <br>
 
 - Secrets never touch command-line arguments, environment variables, the
   clipboard, disk (except the encrypted vault), logs, or the output stream.
-- The wrapper and agent turn off core dumps and debugger attachment at
-  startup (`PR_SET_DUMPABLE=0`, `RLIMIT_CORE=0`).
+- Every taciTTY command turns off core dumps and debugger attachment at
+  startup (`PR_SET_DUMPABLE=0`, `RLIMIT_CORE=0`). Your own shell gets its
+  normal core-dump limit back.
 - Every buffer that holds a secret is wiped as soon as it's no longer
   needed (`zeroize`), locked into memory where possible (`mlock`), and never
-  printed in debug output.
+  printed in debug output. That includes the messages between taciTTY and
+  its agent, and the agent doesn't keep your master passphrase after
+  unlocking.
 - `TACITTY_LOG` records fixed status labels only, never input, aliases or
   secrets. The logging function only accepts compile-time constant strings,
   so this is enforced by the compiler.
 - Secrets are only written to the terminal while it's in password mode
-  (or at a detected remote prompt).
-- Your terminal's settings are restored on every exit path, including
-  crashes and signals.
-- Vault file `0600`, directory `0700`. tacitty refuses to open a vault that
+  (or at a detected remote prompt), and that is **checked again at the
+  moment of sending**. If the prompt went away while you were typing the
+  alias (you pressed Ctrl-C, it timed out, or the program exited), nothing
+  is sent and you see `the password prompt changed, so nothing was sent`.
+- Secrets containing control characters (Tab, Enter, Ctrl-keys, Esc, DEL)
+  are refused from every backend, since the terminal would act on them
+  instead of passing them through.
+- Your terminal's settings are restored when taciTTY exits, including on
+  errors, internal crashes (panics) and termination signals. (No program can
+  do this when killed with `SIGKILL`.)
+- Vault file `0600`, directory `0700`. taciTTY refuses to open a vault that
   other users can read, or that you don't own.
 - The agent's socket checks each caller's user ID and rejects everyone
   else. Like `ssh-agent`, other programs running as *you* can query it
@@ -255,6 +282,11 @@ prevented); someone who can overwrite the vault or config files.
 - `cargo audit` and `cargo deny` run in CI on every push. `openssl` is
   banned from the dependency tree; all cryptography is pure Rust (`age`,
   `chacha20poly1305`, `scrypt`).
+- Releases are built by GitHub Actions with read-only permissions, every
+  third-party action is pinned to an exact commit, and each release file
+  has a signed build-provenance attestation (see [Install](#-install)).
+- `tacitty update` and `install.sh` only download over HTTPS and verify each
+  file's SHA-256 checksum before installing it.
 
 </details>
 
@@ -263,21 +295,25 @@ prevented); someone who can overwrite the vault or config files.
 <br>
 
 - **gpg's default pinentry** (`pinentry-curses`, `pinentry-gnome3`) runs in
-  raw mode or as a GUI, so tacitty can't see it. Set gpg-agent's
+  raw mode or as a GUI, so taciTTY can't see it. Set gpg-agent's
   `pinentry-program` to `pinentry-tty` to use aliases at gpg prompts.
-- **tmux / screen:** if tacitty wraps the tmux *client*, it only sees
-  tmux's own raw terminal. Run tacitty inside each pane instead (see
+- **tmux / screen:** if taciTTY wraps the tmux *client*, it only sees
+  tmux's own raw terminal. Run taciTTY inside each pane instead (see
   `contrib/tacitty.tmux.conf`).
 - Programs that read passwords in raw mode with their own masking (rather
   than the terminal's built-in hidden input) aren't detected.
 - The remote-prompt fallback is a heuristic and could, in principle, match
   a line that isn't really a password prompt. Use `remote.mode = "confirm"`
   if you want a confirmation first.
+- The `.sha256` checksum comes from the same GitHub release as the binary,
+  so it catches corrupted downloads but not a compromised release. To
+  confirm a file was built by this repository's release workflow, verify
+  its attestation with `gh attestation verify` (see [Install](#-install)).
 - A program can print its prompt a split second before it actually hides
-  input. tacitty briefly re-checks right after new output to narrow this
+  input. taciTTY briefly re-checks right after new output to narrow this
   window, but extremely fast or scripted input could still land in it.
 - Windows and macOS aren't supported. GUI apps and browser forms are out of
-  scope; tacitty is not a full password manager.
+  scope; taciTTY is not a full password manager.
 
 </details>
 
@@ -288,10 +324,15 @@ Requires Rust 1.80+.
 ```sh
 cargo build --release                                  # build
 cargo test --lib                                       # unit + randomized robustness tests
-cargo test --test integration -- --test-threads=1     # drive the real binary through real ptys
+cargo test --features test-hooks --test integration -- --test-threads=1
+                                                       # drive the real binary through real ptys
 ```
 
-The integration tests run one at a time on purpose: each starts its own
+The integration tests need the `test-hooks` feature, which enables two
+test-only switches (fast scrypt via `TACITTY_TEST_WORK_FACTOR`, and a local
+release server via `TACITTY_RELEASES_URL`). Normal builds never include
+them, so an environment variable can't weaken a real vault or redirect an
+update. The integration tests run one at a time on purpose: each starts its own
 background agent, and running many at once on a slow machine adds enough
 timing jitter to make results flaky. See [`fuzz/README.md`](fuzz/README.md)
 for the fuzz targets.
@@ -319,7 +360,7 @@ for the fuzz targets.
 
 Copyright © 2026 Sriram P.
 
-tacitty is source-available under the
+taciTTY is source-available under the
 [PolyForm Noncommercial License 1.0.0](LICENSE).
 
 | ✅ Allowed | ❌ Not allowed |
@@ -329,3 +370,10 @@ tacitty is source-available under the
 | Modifying and sharing it for noncommercial purposes | |
 
 For a commercial license, contact **sriram_297@yahoo.com**.
+
+## 🤖 AI disclosure
+
+taciTTY was built with AI assistance. Much of the code, tests and
+documentation was written with [Claude](https://claude.com/claude-code)
+(Anthropic) under the direction of the author, Sriram P, who designed the
+project, made its decisions, and is responsible for it.

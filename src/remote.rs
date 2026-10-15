@@ -15,27 +15,71 @@ pub struct LineTracker {
 }
 
 struct LinePerform {
+    /// Characters, not bytes: trimming a `String` by byte count can split a
+    /// multi-byte character and panic.
+    chars: VecDeque<char>,
     line: String,
-    max_len: usize,
+    max_chars: usize,
+}
+
+impl LinePerform {
+    fn clear(&mut self) {
+        self.chars.clear();
+        self.line.clear();
+    }
 }
 
 impl Perform for LinePerform {
     fn print(&mut self, c: char) {
-        self.line.push(c);
-        if self.line.len() > self.max_len {
-            let excess = self.line.len() - self.max_len;
-            self.line.drain(..excess);
+        self.chars.push_back(c);
+        if self.chars.len() > self.max_chars {
+            self.chars.pop_front();
+            self.line = self.chars.iter().collect();
+        } else {
+            self.line.push(c);
         }
     }
 
     fn execute(&mut self, byte: u8) {
-        if byte == b'\n' || byte == b'\r' {
-            self.line.clear();
+        // Newline, carriage return or backspace: the tracked text no longer
+        // matches what's on screen at the cursor, so start over.
+        if matches!(byte, b'\n' | b'\r' | 0x08) {
+            self.clear();
         }
     }
-    // CSI/OSC/ESC dispatches are intentionally no-ops: we only need the
-    // printable text of the current line, and vte already keeps those
-    // sequences out of `print`.
+
+    fn csi_dispatch(
+        &mut self,
+        _params: &Params,
+        _intermediates: &[u8],
+        _ignore: bool,
+        action: char,
+    ) {
+        // Anything that moves the cursor or erases text means the line on
+        // screen is no longer simply "what was printed since the last
+        // newline". Forget it rather than guess: a missed remote prompt is
+        // safe, a false one is not.
+        if matches!(
+            action,
+            'A' | 'B'
+                | 'C'
+                | 'D'
+                | 'E'
+                | 'F'
+                | 'G'
+                | 'H'
+                | 'J'
+                | 'K'
+                | 'P'
+                | 'X'
+                | '@'
+                | 'd'
+                | 'f'
+                | 'u'
+        ) {
+            self.clear();
+        }
+    }
 }
 
 impl LineTracker {
@@ -43,8 +87,9 @@ impl LineTracker {
         LineTracker {
             parser: Parser::new(),
             perform: LinePerform {
+                chars: VecDeque::new(),
                 line: String::new(),
-                max_len: 512,
+                max_chars: 512,
             },
         }
     }
@@ -109,12 +154,6 @@ pub fn is_allowlisted(comm: &str, allowlist: &[String]) -> bool {
     allowlist.iter().any(|a| a == comm)
 }
 
-// Silence "unused" for csi_dispatch etc. while keeping the doc comment
-// self-explanatory; vte's default Perform impls are all no-ops already, so
-// LinePerform doesn't need to implement them.
-#[allow(unused)]
-fn _assert_params_type_in_scope(_p: &Params) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,18 +176,53 @@ mod tests {
 
     #[test]
     fn prompt_regex_matches_common_forms() {
-        let re = Regex::new(r"(?i)(password|passphrase|passcode|pin)[^\n]*:\s*$").unwrap();
+        let re = crate::config::Config::default().prompt_regex();
         for line in [
             "Password: ",
             "[sudo] password for sriram: ",
+            "Password for user postgres: ",
+            "admin@10.42.0.15's password: ",
             "Enter passphrase for key '/home/sriram/.ssh/id_ed25519': ",
             "PIN: ",
+            "Enter PIN for 'token': ",
         ] {
             assert!(looks_like_prompt(&re, line), "{line:?}");
         }
-        for line in ["$ ", "Permission denied", "password changed successfully"] {
+        for line in [
+            "$ ",
+            "Permission denied",
+            "password changed successfully",
+            // "pin" inside other words must not count.
+            "Shipping address: ",
+            "Stopping: ",
+            "Mapping name: ",
+            "Opinion: ",
+        ] {
             assert!(!looks_like_prompt(&re, line), "{line:?}");
         }
+    }
+
+    #[test]
+    fn long_multibyte_lines_never_panic() {
+        let mut lt = LineTracker::new();
+        let mut line = "é".repeat(700).into_bytes();
+        line.extend_from_slice("日本語".repeat(300).as_bytes());
+        lt.feed(&line);
+        assert_eq!(lt.current_line().chars().count(), 512);
+        lt.feed(b"\nPassword: ");
+        assert_eq!(lt.current_line(), "Password: ");
+    }
+
+    #[test]
+    fn cursor_movement_and_erase_forget_the_line() {
+        let mut lt = LineTracker::new();
+        lt.feed(b"Password: ");
+        lt.feed(b"\x1b[2K");
+        assert_eq!(lt.current_line(), "");
+        lt.feed(b"Password: \x1b[10G");
+        assert_eq!(lt.current_line(), "");
+        lt.feed(b"Password: \x08");
+        assert_eq!(lt.current_line(), "");
     }
 
     #[test]

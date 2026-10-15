@@ -5,28 +5,38 @@ on:
     branches: [main]
   pull_request:
 
+# Read-only by default; no job here needs to write anything.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
-  # Speeds up scrypt in tests only; the real vault always uses age's
-  # default (expensive) scrypt parameters. See src/vault.rs.
+  # Speeds up scrypt in tests. Only honoured by builds with the `test-hooks`
+  # feature; real builds ignore it. See src/vault.rs.
   TACITTY_TEST_WORK_FACTOR: "8"
 
+# Third-party actions are pinned to full commit SHAs (tag in the comment),
+# so a moved or compromised tag can't change what runs here.
 jobs:
   test:
     name: build, test, lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
+          toolchain: stable
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: fmt
         run: cargo fmt --all -- --check
 
-      - name: clippy (lib, bin, tests)
+      - name: clippy (normal build)
         run: cargo clippy --all-targets -- -D warnings
+
+      - name: clippy (with test hooks)
+        run: cargo clippy --all-targets --features test-hooks -- -D warnings
 
       - name: unit tests
         run: cargo test --lib
@@ -37,7 +47,7 @@ jobs:
         # each test starts its own agent daemon, and serializing them keeps
         # CI runners (often 1-2 vCPUs) from hitting the scheduling-jitter
         # flakiness a bare-metal desktop wouldn't see.
-        run: cargo test --test integration -- --test-threads=1
+        run: cargo test --features test-hooks --test integration -- --test-threads=1
 
       - name: doctor smoke test
         run: |
@@ -48,29 +58,36 @@ jobs:
     name: cargo audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@cargo-audit
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-audit
       - run: cargo audit
 
   deny:
     name: cargo deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
 
   fuzz-smoke:
     name: fuzz targets build + short run
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: "fuzz -> target"
-      - uses: taiki-e/install-action@cargo-fuzz
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-fuzz
       - name: build fuzz targets
         run: |
           cargo +nightly fuzz build statemachine
@@ -89,17 +106,19 @@ jobs:
       matrix:
         target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: stable
       # Installs the target and configures its linker (and qemu for aarch64).
-      - uses: taiki-e/setup-cross-toolchain-action@v1
+      - uses: taiki-e/setup-cross-toolchain-action@12b7ad4acfa95a1476779d6c06699b96ec1691f8 # v1.42.0
         with:
           target: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ matrix.target }}
       - run: cargo build --release --locked --target ${{ matrix.target }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: tacitty-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/tacitty

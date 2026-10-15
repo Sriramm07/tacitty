@@ -10,7 +10,7 @@
 //! before it is renamed over the old one.
 
 use std::fs;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -19,12 +19,26 @@ use sha2::{Digest, Sha256};
 
 const DEFAULT_RELEASES_URL: &str = "https://github.com/Sriramm07/tacitty/releases";
 
-/// Base releases URL; `TACITTY_RELEASES_URL` overrides it (used by tests).
-fn releases_url() -> String {
+/// `TACITTY_RELEASES_URL`, honoured only in builds with the `test-hooks`
+/// feature (the integration tests point it at a local server). In every
+/// normal build an environment variable can't redirect updates.
+fn releases_url_override() -> Option<String> {
+    if !cfg!(feature = "test-hooks") {
+        return None;
+    }
     std::env::var("TACITTY_RELEASES_URL")
         .ok()
         .filter(|u| !u.is_empty())
-        .unwrap_or_else(|| DEFAULT_RELEASES_URL.to_string())
+}
+
+fn releases_url() -> String {
+    releases_url_override().unwrap_or_else(|| DEFAULT_RELEASES_URL.to_string())
+}
+
+/// Downloads must stay on HTTPS, including across redirects, except when a
+/// test build points at a local server.
+fn https_only() -> bool {
+    releases_url_override().is_none()
 }
 
 /// The release target triple for this machine's prebuilt binary.
@@ -94,11 +108,17 @@ impl Fetcher {
         let mut cmd = match self {
             Fetcher::Curl => {
                 let mut c = Command::new("curl");
+                if https_only() {
+                    c.args(["--proto", "=https", "--proto-redir", "=https"]);
+                }
                 c.args(["-fsSL", "-o"]).arg(dest).arg(url);
                 c
             }
             Fetcher::Wget => {
                 let mut c = Command::new("wget");
+                if https_only() {
+                    c.arg("--https-only");
+                }
                 c.args(["-q", "-O"]).arg(dest).arg(url);
                 c
             }
@@ -116,14 +136,24 @@ impl Fetcher {
     /// The URL `url` finally redirects to.
     fn final_url(&self, url: &str) -> Result<String> {
         let out = match self {
-            Fetcher::Curl => Command::new("curl")
-                .args(["-fsSLI", "-o", "/dev/null", "-w", "%{url_effective}", url])
-                .stdin(Stdio::null())
-                .output(),
-            Fetcher::Wget => Command::new("wget")
-                .args(["-q", "-S", "--spider", url])
-                .stdin(Stdio::null())
-                .output(),
+            Fetcher::Curl => {
+                let mut c = Command::new("curl");
+                if https_only() {
+                    c.args(["--proto", "=https", "--proto-redir", "=https"]);
+                }
+                c.args(["-fsSLI", "-o", "/dev/null", "-w", "%{url_effective}", url])
+                    .stdin(Stdio::null())
+                    .output()
+            }
+            Fetcher::Wget => {
+                let mut c = Command::new("wget");
+                if https_only() {
+                    c.arg("--https-only");
+                }
+                c.args(["-q", "-S", "--spider", url])
+                    .stdin(Stdio::null())
+                    .output()
+            }
         }
         .context("running the downloader")?;
         if !out.status.success() {
@@ -238,10 +268,24 @@ pub fn run(check_only: bool) -> Result<Outcome> {
 
         // Stage next to the old binary so the final rename is atomic (same
         // filesystem), and refuse to swap in anything that doesn't run.
-        let staged = dir.join(".tacitty.update");
-        fs::copy(work.join(&name).join("tacitty"), &staged)
-            .with_context(|| format!("writing {} (is it writable?)", staged.display()))?;
-        fs::set_permissions(&staged, fs::Permissions::from_mode(0o755))?;
+        // A fresh random name, created exclusively and without following
+        // symlinks, so nothing else can be waiting at that path.
+        let staged = dir.join(format!(".tacitty.update-{}", random_hex(8)?));
+        {
+            let mut src = fs::File::open(work.join(&name).join("tacitty"))
+                .context("opening the unpacked binary")?;
+            let mut dst = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o755)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&staged)
+                .with_context(|| format!("writing {} (is it writable?)", staged.display()))?;
+            if let Err(e) = std::io::copy(&mut src, &mut dst).and_then(|_| dst.sync_all()) {
+                let _ = fs::remove_file(&staged);
+                return Err(e).context("writing the new binary");
+            }
+        }
         let out = Command::new(&staged)
             .arg("--version")
             .stdin(Stdio::null())
@@ -269,12 +313,15 @@ pub fn run(check_only: bool) -> Result<Outcome> {
     })
 }
 
+fn random_hex(bytes: usize) -> Result<String> {
+    let mut rnd = vec![0u8; bytes];
+    crate::sys::getrandom(&mut rnd)?;
+    Ok(rnd.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 /// A fresh private directory under `parent`.
 fn tempdir_in(parent: &Path) -> Result<PathBuf> {
-    let mut rnd = [0u8; 8];
-    crate::sys::getrandom(&mut rnd)?;
-    let suffix: String = rnd.iter().map(|b| format!("{b:02x}")).collect();
-    let dir = parent.join(format!("tacitty-update-{suffix}"));
+    let dir = parent.join(format!("tacitty-update-{}", random_hex(8)?));
     fs::DirBuilder::new()
         .mode(0o700)
         .create(&dir)

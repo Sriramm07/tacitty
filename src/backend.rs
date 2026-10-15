@@ -4,8 +4,9 @@
 //! inherently need to *store* a secret, which only the native vault does).
 //! `Pass`, `SecretService` and `Command` only implement `get`/`list`.
 
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::io::{Read, Write};
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
@@ -30,6 +31,66 @@ pub enum BackendError {
     NonZeroExit { cmd: String, status: String },
     #[error("{0}")]
     Other(String),
+}
+
+/// How long a helper program (`pass`, `secret-tool`, a `command` template)
+/// may take before it is killed. The wrapper waits on it with the user's
+/// terminal paused, so a hung helper must not freeze the terminal forever.
+const HELPER_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Run `cmd` with stdin closed, capturing stdout into a self-wiping buffer
+/// (stderr is discarded). Kills it after [`HELPER_TIMEOUT`].
+fn run_helper(cmd: &mut Command, name: &str) -> Result<(ExitStatus, SecretBuf), BackendError> {
+    let spawn_err = |e| BackendError::Spawn {
+        cmd: name.to_string(),
+        source: e,
+    };
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(spawn_err)?;
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let reader = std::thread::spawn(move || {
+        let mut out = SecretBuf::with_capacity(256);
+        let mut chunk = zeroize::Zeroizing::new([0u8; 4096]);
+        loop {
+            match stdout.read(&mut chunk[..]) {
+                Ok(0) | Err(_) => break,
+                // Cap what we keep: a secret is at most a few KiB.
+                Ok(n) if out.len() < 64 * 1024 => out.extend_from_slice(&chunk[..n]),
+                Ok(_) => {}
+            }
+        }
+        out
+    });
+    let deadline = Instant::now() + HELPER_TIMEOUT;
+    let status = loop {
+        match child.try_wait().map_err(spawn_err)? {
+            Some(status) => break status,
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return Err(BackendError::Other(format!(
+                    "`{name}` did not finish within {}s",
+                    HELPER_TIMEOUT.as_secs()
+                )));
+            }
+            None => std::thread::sleep(Duration::from_millis(10)),
+        }
+    };
+    let out = reader
+        .join()
+        .map_err(|_| BackendError::Other(format!("reading output of `{name}`")))?;
+    Ok((status, out))
+}
+
+/// The first line of `out` (without its `\n`, or `\r\n`), as a secret.
+fn first_line(out: &SecretBuf) -> SecretBuf {
+    let line = out.split(|&b| b == b'\n').next().unwrap_or_default();
+    SecretBuf::from_slice(line.strip_suffix(b"\r").unwrap_or(line))
 }
 
 pub trait SecretBackend {
@@ -72,21 +133,11 @@ pub struct PassBackend {
 impl SecretBackend for PassBackend {
     fn get(&self, alias: &str) -> Result<SecretBuf, BackendError> {
         let path = format!("{}/{}", self.cfg.prefix, alias);
-        let out = Command::new("pass")
-            .arg("show")
-            .arg(&path)
-            .stdin(Stdio::null())
-            .stderr(Stdio::piped())
-            .output()
-            .map_err(|e| BackendError::Spawn {
-                cmd: "pass show".into(),
-                source: e,
-            })?;
-        if !out.status.success() {
+        let (status, out) = run_helper(Command::new("pass").arg("show").arg(&path), "pass show")?;
+        if !status.success() {
             return Err(BackendError::NotFound(alias.to_string()));
         }
-        let first_line = out.stdout.split(|&b| b == b'\n').next().unwrap_or_default();
-        Ok(SecretBuf::from_slice(first_line))
+        Ok(first_line(&out))
     }
 
     fn list(&self) -> Result<Vec<String>, BackendError> {
@@ -131,21 +182,16 @@ pub struct SecretServiceBackend;
 
 impl SecretBackend for SecretServiceBackend {
     fn get(&self, alias: &str) -> Result<SecretBuf, BackendError> {
-        let out = Command::new("secret-tool")
-            .args(["lookup", "application", "tacitty", "alias", alias])
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| BackendError::Spawn {
-                cmd: "secret-tool lookup".into(),
-                source: e,
-            })?;
-        if !out.status.success() || out.stdout.is_empty() {
+        let (status, out) = run_helper(
+            Command::new("secret-tool").args(["lookup", "application", "tacitty", "alias", alias]),
+            "secret-tool lookup",
+        )?;
+        if !status.success() || out.is_empty() {
             return Err(BackendError::NotFound(alias.to_string()));
         }
         // secret-tool does not append a trailing newline, but strip one
         // defensively.
-        let s = out.stdout.strip_suffix(b"\n").unwrap_or(&out.stdout);
-        Ok(SecretBuf::from_slice(s))
+        Ok(first_line(&out))
     }
 
     fn list(&self) -> Result<Vec<String>, BackendError> {
@@ -247,20 +293,11 @@ fn split_template(template: &str, alias: &str) -> Result<Vec<String>, BackendErr
 impl SecretBackend for CommandBackend {
     fn get(&self, alias: &str) -> Result<SecretBuf, BackendError> {
         let words = split_template(&self.cfg.get, alias)?;
-        let out = Command::new(&words[0])
-            .args(&words[1..])
-            .stdin(Stdio::null())
-            .stderr(Stdio::piped())
-            .output()
-            .map_err(|e| BackendError::Spawn {
-                cmd: words[0].clone(),
-                source: e,
-            })?;
-        if !out.status.success() {
+        let (status, out) = run_helper(Command::new(&words[0]).args(&words[1..]), &words[0])?;
+        if !status.success() {
             return Err(BackendError::NotFound(alias.to_string()));
         }
-        let first_line = out.stdout.split(|&b| b == b'\n').next().unwrap_or_default();
-        Ok(SecretBuf::from_slice(first_line))
+        Ok(first_line(&out))
     }
 
     fn list(&self) -> Result<Vec<String>, BackendError> {

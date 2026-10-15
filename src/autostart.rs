@@ -176,18 +176,43 @@ fn target_shells() -> Result<Vec<Shell>> {
     Ok(out)
 }
 
-/// Write `content` to `path` in place (following symlinks, so dotfile
-/// managers keep working), creating it 0644 if it doesn't exist yet.
+/// Replace `path` with `content` atomically: write a temporary file next
+/// to it and rename it into place, so a crash or full disk can never leave
+/// a half-written rc file. A symlinked rc file (dotfile managers) is
+/// followed, and the real file is replaced, keeping its permissions.
 fn write_rc(path: &Path, content: &str) -> Result<()> {
-    let mut f = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o644)
-        .open(path)
-        .with_context(|| format!("opening {}", path.display()))?;
-    f.write_all(content.as_bytes())
-        .with_context(|| format!("writing {}", path.display()))
+    let target = match fs::canonicalize(path) {
+        Ok(real) => real,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
+        Err(e) => return Err(e).with_context(|| format!("resolving {}", path.display())),
+    };
+    let mode = fs::metadata(&target)
+        .map(|m| m.permissions().mode() & 0o7777)
+        .unwrap_or(0o644);
+    let dir = target.parent().context("rc file has no parent directory")?;
+    let name = target
+        .file_name()
+        .context("rc file has no name")?
+        .to_string_lossy()
+        .into_owned();
+    let tmp = dir.join(format!(".{name}.tacitty-{}", std::process::id()));
+    let result = (|| -> Result<()> {
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&tmp)
+            .with_context(|| format!("creating {}", tmp.display()))?;
+        f.write_all(content.as_bytes())
+            .and_then(|_| f.sync_all())
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        fs::rename(&tmp, &target).with_context(|| format!("replacing {}", target.display()))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 
 fn read_rc(path: &Path) -> Result<String> {

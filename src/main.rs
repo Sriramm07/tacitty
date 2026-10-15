@@ -91,8 +91,15 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
-    sys::ignore_sigpipe();
+    // Every command may hold the decrypted vault or the master passphrase
+    // in memory, so all of them refuse core dumps and debugger attachment.
+    sys::harden_process();
     let cli = Cli::parse();
+    match cli.cmd {
+        // The wrapper and the agent handle write errors themselves.
+        Cmd::Shell { .. } | Cmd::Agent { .. } => sys::ignore_sigpipe(),
+        _ => sys::default_sigpipe(),
+    }
     let code = match cli.cmd {
         Cmd::Init { no_autostart } => cmd_init(no_autostart),
         Cmd::Add {
@@ -328,12 +335,24 @@ fn read_secret_prompted(prompt: &str) -> Result<SecretBuf> {
 
 fn generate_secret(length: usize) -> Result<SecretBuf> {
     const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789-_.";
+    // Largest multiple of the charset size that fits in a byte; random
+    // bytes at or above it are discarded so every character is equally
+    // likely (plain `% len` would favour the first few).
+    const LIMIT: u8 = (256 / CHARSET.len() * CHARSET.len()) as u8;
     let len = length.clamp(8, vault::MAX_SECRET_LEN);
-    let mut raw = vec![0u8; len];
-    sys::getrandom(&mut raw)?;
     let mut out = SecretBuf::with_capacity(len);
-    for b in raw {
-        out.push(CHARSET[(b as usize) % CHARSET.len()]);
+    let mut raw = SecretBuf::from_slice(&[0u8; 64]);
+    while out.len() < len {
+        let mut chunk = [0u8; 64];
+        sys::getrandom(&mut chunk)?;
+        raw.clear();
+        raw.extend_from_slice(&chunk);
+        zeroize::Zeroize::zeroize(&mut chunk);
+        for &b in raw.as_slice() {
+            if b < LIMIT && out.len() < len {
+                out.push(CHARSET[(b as usize) % CHARSET.len()]);
+            }
+        }
     }
     Ok(out)
 }

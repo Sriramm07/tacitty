@@ -59,7 +59,7 @@ impl Default for RemoteConfig {
             .iter()
             .map(|s| s.to_string())
             .collect(),
-            prompt_regex: r"(?i)(password|passphrase|passcode|pin)[^\n]*:\s*$".to_string(),
+            prompt_regex: r"(?i)\b(password|passphrase|passcode|pin)\b[^\n]*:\s*$".to_string(),
         }
     }
 }
@@ -199,21 +199,30 @@ pub fn vault_path() -> Result<PathBuf> {
 }
 
 /// Per-user runtime directory (`$XDG_RUNTIME_DIR/tacitty`, mode 0700).
+/// Without `XDG_RUNTIME_DIR` it falls back to a directory under the user's
+/// own state dir rather than a predictable name in the world-writable
+/// `/tmp`, which another user could create first to block the agent.
 pub fn runtime_dir() -> Result<PathBuf> {
     match std::env::var_os("XDG_RUNTIME_DIR") {
         Some(v) if !v.is_empty() && Path::new(&v).is_absolute() => {
             Ok(PathBuf::from(v).join("tacitty"))
         }
-        _ => Ok(PathBuf::from(format!("/tmp/tacitty-{}", sys::geteuid()))),
+        _ => Ok(xdg("XDG_STATE_HOME", ".local/state")?
+            .join("tacitty")
+            .join("run")),
     }
 }
 
+/// Bump when the agent wire protocol changes, so a new client never talks
+/// to an older agent that is still running from before an update.
+const AGENT_PROTOCOL: u32 = 2;
+
 pub fn agent_sock_path() -> Result<PathBuf> {
-    Ok(runtime_dir()?.join("agent.sock"))
+    Ok(runtime_dir()?.join(format!("agent-{AGENT_PROTOCOL}.sock")))
 }
 
 pub fn agent_lock_path() -> Result<PathBuf> {
-    Ok(runtime_dir()?.join("agent.lock"))
+    Ok(runtime_dir()?.join(format!("agent-{AGENT_PROTOCOL}.lock")))
 }
 
 /// Create `dir` (and parents) if needed and make sure it is a real directory,

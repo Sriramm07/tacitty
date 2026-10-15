@@ -30,6 +30,21 @@ impl LineMode {
     fn is_secret(self) -> bool {
         self != LineMode::None
     }
+
+    fn is_remote(self) -> bool {
+        matches!(self, LineMode::RemoteAuto | LineMode::RemoteConfirm)
+    }
+}
+
+/// What the terminal looked like when an `@alias` capture started. Checked
+/// again right before the secret is sent: if the prompt has gone away in
+/// the meantime (Ctrl-C, a timeout, the program exiting), the secret must
+/// not be sent to whatever is reading the terminal now.
+#[derive(Clone, Copy)]
+struct CaptureCtx {
+    mode: LineMode,
+    pgid: Option<i32>,
+    output_seq: u64,
 }
 
 /// RAII guard: puts `fd` into raw mode and restores the original termios
@@ -103,7 +118,7 @@ fn read_line_noecho(max_len: usize) -> io::Result<SecretBuf> {
 
 fn prompt_passphrase_and_unlock(resolver: &mut Resolver) -> Result<bool, String> {
     write_stdout(b"\r\ntacitty: enter master passphrase to unlock vault: ");
-    let pass_bytes = read_line_noecho(1024).map_err(|e| e.to_string())?;
+    let pass_bytes = read_line_noecho(4096).map_err(|e| e.to_string())?;
     write_stdout(b"\x1b[2K\r"); // best-effort erase of the local prompt line
     if pass_bytes.is_empty() {
         return Ok(false);
@@ -163,6 +178,14 @@ fn classify_line(
     if matches!(cfg.remote.mode, crate::config::RemoteMode::Off) {
         return LineMode::None;
     }
+    // A real interactive ssh/mosh/docker -t/kubectl -t client turns local
+    // echo off. If it's still on (`ssh host 'sudo -S ...'`, `ssh -T`,
+    // `kubectl exec -i` without -t), the local terminal itself would print
+    // the secret, so never treat the line as a password prompt.
+    match sys::tcgetattr(master_fd) {
+        Ok(t) if t.c_lflag & libc::ECHO == 0 => {}
+        _ => return LineMode::None,
+    }
     let Ok(pgid) = sys::tcgetpgrp(master_fd) else {
         return LineMode::None;
     };
@@ -180,6 +203,47 @@ fn classify_line(
         crate::config::RemoteMode::Auto => LineMode::RemoteAuto,
         _ => LineMode::RemoteConfirm,
     }
+}
+
+/// Is the line `ctx` was captured on still the same password prompt? Every
+/// check here must pass, or the secret is not sent:
+/// - no output from the child since the capture started (and none waiting
+///   to be read): a prompt that times out or exits prints something;
+/// - the same foreground process group is reading the terminal;
+/// - the terminal is still in password mode, of the same kind.
+fn capture_still_valid(
+    master_fd: RawFd,
+    ctx: &CaptureCtx,
+    output_seq: u64,
+    cfg: &Config,
+    alt: &AltScreenTracker,
+    line_tracker: &LineTracker,
+) -> bool {
+    if output_seq != ctx.output_seq {
+        return false;
+    }
+    let mut pfd = [libc::pollfd {
+        fd: master_fd,
+        events: libc::POLLIN,
+        revents: 0,
+    }];
+    if !matches!(sys::poll(&mut pfd, 0), Ok(0)) {
+        return false;
+    }
+    if sys::tcgetpgrp(master_fd).ok() != ctx.pgid {
+        return false;
+    }
+    let now = classify_line(master_fd, alt.is_active(), false, false, cfg, line_tracker);
+    match ctx.mode {
+        LineMode::Local => now == LineMode::Local,
+        LineMode::RemoteAuto | LineMode::RemoteConfirm => now.is_remote(),
+        LineMode::None => false,
+    }
+}
+
+fn report_not_sent() {
+    ring_local_bell();
+    write_stdout(b"\r\ntacitty: the password prompt changed, so nothing was sent\r\n");
 }
 
 pub struct RunOptions {
@@ -233,6 +297,8 @@ pub fn run(cfg: Config, options: RunOptions) -> anyhow::Result<i32> {
     let mut suppressed = false;
     let mut title_shown = false;
     let mut last_output_at = Instant::now() - Duration::from_secs(1);
+    let mut output_seq: u64 = 0;
+    let mut capture: Option<CaptureCtx> = None;
 
     let exit_code: i32;
 
@@ -325,6 +391,14 @@ pub fn run(cfg: Config, options: RunOptions) -> anyhow::Result<i32> {
                     line_tracker.feed(&buf[..n]);
                     suppressed = false;
                     last_output_at = Instant::now();
+                    output_seq = output_seq.wrapping_add(1);
+                    // New output can mean a new prompt (or no prompt any
+                    // more): decide afresh on the next keystroke. A capture
+                    // in progress keeps its decision, and is re-checked
+                    // (and refused, since output arrived) before sending.
+                    if !sm.is_capturing() {
+                        cached_mode = None;
+                    }
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
                 Err(e) if e.raw_os_error() == Some(libc::EIO) => {
@@ -357,6 +431,8 @@ pub fn run(cfg: Config, options: RunOptions) -> anyhow::Result<i32> {
                             &mut suppressed,
                             &mut title_shown,
                             last_output_at,
+                            output_seq,
+                            &mut capture,
                         );
                     }
                 }
@@ -386,6 +462,8 @@ fn handle_input_byte(
     suppressed: &mut bool,
     title_shown: &mut bool,
     last_output_at: Instant,
+    output_seq: u64,
+    capture: &mut Option<CaptureCtx>,
 ) {
     let mode = *cached_mode.get_or_insert_with(|| {
         let just_settled = last_output_at.elapsed() < Duration::from_millis(150);
@@ -402,6 +480,13 @@ fn handle_input_byte(
 
     let was_capturing = sm.is_capturing();
     let action = sm.process(b, secret_mode);
+    if !was_capturing && sm.is_capturing() {
+        *capture = Some(CaptureCtx {
+            mode,
+            pgid: sys::tcgetpgrp(master_fd).ok(),
+            output_seq,
+        });
+    }
 
     if cfg.title_indicator {
         if !was_capturing && sm.is_capturing() {
@@ -417,7 +502,10 @@ fn handle_input_byte(
         Action::Consumed => {}
         Action::Forward(byte) => {
             let _ = sys::write_all_fd(master_fd, &[byte]);
-            if byte == b'\r' || byte == b'\n' {
+            // Enter ends the line. Ctrl-C / Ctrl-D / Ctrl-Z usually end the
+            // program reading it (or the prompt), so the next keystroke
+            // must be classified afresh, not trusted from before.
+            if matches!(byte, b'\r' | b'\n' | 0x03 | 0x04 | 0x1a) {
                 if secret_mode {
                     *suppressed = true;
                 }
@@ -436,31 +524,58 @@ fn handle_input_byte(
                 *suppressed = true;
             }
             *cached_mode = None;
+            let Some(ctx) = capture.take() else {
+                ring_local_bell();
+                return;
+            };
+            let still_valid =
+                || capture_still_valid(master_fd, &ctx, output_seq, cfg, alt, line_tracker);
 
             if mode == LineMode::RemoteConfirm && !confirm_locally(&alias) {
                 ring_local_bell();
                 return;
             }
 
-            deliver(master_fd, cfg, resolver, &alias, enter_byte);
+            deliver(master_fd, cfg, resolver, &alias, enter_byte, &still_valid);
         }
+    }
+    if !sm.is_capturing() {
+        *capture = None;
     }
 }
 
-fn deliver(master_fd: RawFd, cfg: &Config, resolver: &mut Resolver, alias: &str, enter_byte: u8) {
+/// Look up `alias` and send it, but only if `still_valid()` holds at the
+/// moment of sending (checked after any unlock or confirmation, which can
+/// take a while).
+fn deliver(
+    master_fd: RawFd,
+    cfg: &Config,
+    resolver: &mut Resolver,
+    alias: &str,
+    enter_byte: u8,
+    still_valid: &dyn Fn() -> bool,
+) {
     match resolver.resolve(alias) {
         ResolveOutcome::Found(secret) => {
+            if !still_valid() {
+                report_not_sent();
+                return;
+            }
             let line = statemachine::resolved_line(secret.as_slice());
             let _ = sys::write_all_fd(master_fd, line.as_slice());
         }
         ResolveOutcome::Locked => match prompt_passphrase_and_unlock(resolver) {
-            Ok(true) => deliver(master_fd, cfg, resolver, alias, enter_byte),
+            Ok(true) => deliver(master_fd, cfg, resolver, alias, enter_byte, still_valid),
             Ok(false) => ring_local_bell(),
             Err(_) => ring_local_bell(),
         },
         ResolveOutcome::NotFound => match cfg.on_miss {
             crate::config::OnMiss::Bell => ring_local_bell(),
             crate::config::OnMiss::Literal => {
+                if !still_valid() {
+                    report_not_sent();
+                    return;
+                }
                 let line = statemachine::literal_line(cfg.trigger_byte(), alias, enter_byte);
                 let _ = sys::write_all_fd(master_fd, line.as_slice());
             }

@@ -42,17 +42,34 @@ pub struct HardenReport {
     pub core_limit_zero: bool,
 }
 
-/// Disable core dumps and ptrace-attachability (`PR_SET_DUMPABLE=0`,
-/// `RLIMIT_CORE=0`). Best effort; the report says what succeeded.
+/// The process's core-dump limit from before [`harden_process`] lowered
+/// it, so children (the user's shell) can be given it back.
+static ORIGINAL_CORE_LIMIT: std::sync::OnceLock<libc::rlimit> = std::sync::OnceLock::new();
+
+/// Disable core dumps and ptrace-attachability (`PR_SET_DUMPABLE=0`, soft
+/// `RLIMIT_CORE=0`). Best effort; the report says what succeeded. Only the
+/// soft limit is lowered, so [`spawn_on_pty`] can restore the original
+/// limit for the user's shell instead of disabling core dumps for every
+/// program they run. Safe to call more than once.
 pub fn harden_process() -> HardenReport {
     // SAFETY: prctl with PR_SET_DUMPABLE takes plain integer arguments.
     let dumpable_off = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } == 0;
-    let lim = libc::rlimit {
+    let mut cur = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,
     };
-    // SAFETY: `lim` is a valid, initialised rlimit that outlives the call.
-    let core_limit_zero = unsafe { libc::setrlimit(libc::RLIMIT_CORE, &lim) } == 0;
+    // SAFETY: `cur` is a valid rlimit for getrlimit to fill in.
+    let core_limit_zero = if unsafe { libc::getrlimit(libc::RLIMIT_CORE, &mut cur) } == 0 {
+        let original = *ORIGINAL_CORE_LIMIT.get_or_init(|| cur);
+        let lim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: original.rlim_max,
+        };
+        // SAFETY: `lim` is a valid, initialised rlimit that outlives the call.
+        unsafe { libc::setrlimit(libc::RLIMIT_CORE, &lim) == 0 }
+    } else {
+        false
+    };
     HardenReport {
         dumpable_off,
         core_limit_zero,
@@ -330,15 +347,21 @@ pub fn spawn_on_pty(cmd: &mut Command, slave: OwnedFd) -> io::Result<Child> {
     cmd.stdin(Stdio::from(slave.try_clone()?));
     cmd.stdout(Stdio::from(slave.try_clone()?));
     cmd.stderr(Stdio::from(slave));
+    let restore_core = ORIGINAL_CORE_LIMIT.get().copied();
     // SAFETY: the closure runs between fork and exec and only calls
-    // async-signal-safe functions (setsid, ioctl).
+    // async-signal-safe functions (setsid, ioctl, setrlimit).
     unsafe {
-        cmd.pre_exec(|| {
+        cmd.pre_exec(move || {
             if libc::setsid() == -1 {
                 return Err(io::Error::last_os_error());
             }
             if libc::ioctl(0, libc::TIOCSCTTY, 0) == -1 {
                 return Err(io::Error::last_os_error());
+            }
+            // Give the user's shell back the core-dump limit it would have
+            // had without tacitty (best effort).
+            if let Some(lim) = restore_core {
+                libc::setrlimit(libc::RLIMIT_CORE, &lim);
             }
             Ok(())
         });
@@ -428,6 +451,16 @@ pub fn ignore_sigpipe() {
     // SAFETY: SIG_IGN is a valid disposition for SIGPIPE.
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+}
+
+/// Restore the default SIGPIPE action (quietly terminate, no core dump),
+/// so `tacitty ls | head -1` simply stops when `head` exits instead of
+/// failing on a broken pipe.
+pub fn default_sigpipe() {
+    // SAFETY: SIG_DFL is a valid disposition for SIGPIPE.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 }
 

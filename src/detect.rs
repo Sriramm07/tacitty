@@ -4,8 +4,9 @@ use std::os::fd::RawFd;
 
 use crate::sys;
 
-/// `!ECHO && (ICANON || ECHONL)` on the pty master's termios — the same
-/// heuristic used by Ghostty and ghostel.
+/// `!ECHO && (ICANON || ECHONL)` on the pty master's termios: input is
+/// hidden, but still read a line at a time (how password prompts read), as
+/// opposed to raw mode (how editors and full-screen programs read).
 pub fn is_secret_termios(t: &libc::termios) -> bool {
     let echo_off = t.c_lflag & libc::ECHO == 0;
     let canon_ish = (t.c_lflag & libc::ICANON != 0) || (t.c_lflag & libc::ECHONL != 0);
@@ -20,19 +21,31 @@ pub fn read_secret_mode(master_fd: RawFd) -> bool {
 }
 
 /// Tracks whether the child currently has the terminal's alternate screen
-/// buffer active (`ESC[?1049h` / `?47h` / `?1047h` ... `l`), by scanning
-/// output bytes for those specific DEC private-mode sequences. Anything more
-/// (full VTE emulation) is unnecessary: we only need this one bit.
+/// buffer active (DEC private modes 1049 / 1047 / 47, set with
+/// `ESC [ ? <params> h` and reset with `... l`). A small byte-level parser
+/// handles combined parameters (`ESC[?1049;2004h`), back-to-back sequences
+/// and sequences split across reads. Anything more (full VTE emulation) is
+/// unnecessary: we only need this one bit.
 #[derive(Default)]
 pub struct AltScreenTracker {
     active: bool,
-    // small rolling buffer to catch sequences split across read() calls
-    tail: Vec<u8>,
+    state: AltState,
+    params: Vec<u16>,
+    current: Option<u16>,
 }
 
-const NEEDLES_ON: [&[u8]; 3] = [b"\x1b[?1049h", b"\x1b[?47h", b"\x1b[?1047h"];
-const NEEDLES_OFF: [&[u8]; 3] = [b"\x1b[?1049l", b"\x1b[?47l", b"\x1b[?1047l"];
-const MAX_NEEDLE: usize = 8;
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum AltState {
+    #[default]
+    Ground,
+    Esc,
+    Csi,
+    PrivateParams,
+}
+
+/// More parameters than any real sequence uses; beyond this we give up on
+/// the sequence rather than grow without bound.
+const MAX_PARAMS: usize = 16;
 
 impl AltScreenTracker {
     pub fn new() -> Self {
@@ -44,25 +57,69 @@ impl AltScreenTracker {
     }
 
     pub fn feed(&mut self, chunk: &[u8]) {
-        self.tail.extend_from_slice(chunk);
-        let mut i = 0;
-        while i < self.tail.len() {
-            let rest = &self.tail[i..];
-            if NEEDLES_ON.iter().any(|n| rest.starts_with(n)) {
-                self.active = true;
-                i += 8;
-                continue;
-            }
-            if NEEDLES_OFF.iter().any(|n| rest.starts_with(n)) {
-                self.active = false;
-                i += 8;
-                continue;
-            }
-            i += 1;
+        for &b in chunk {
+            self.step(b);
         }
-        if self.tail.len() > MAX_NEEDLE * 4 {
-            let cut = self.tail.len() - (MAX_NEEDLE - 1);
-            self.tail.drain(..cut);
+    }
+
+    fn step(&mut self, b: u8) {
+        match self.state {
+            AltState::Ground => {
+                if b == 0x1b {
+                    self.state = AltState::Esc;
+                }
+            }
+            AltState::Esc => {
+                self.state = if b == b'[' {
+                    AltState::Csi
+                } else if b == 0x1b {
+                    AltState::Esc
+                } else {
+                    AltState::Ground
+                };
+            }
+            AltState::Csi => {
+                if b == b'?' {
+                    self.params.clear();
+                    self.current = None;
+                    self.state = AltState::PrivateParams;
+                } else {
+                    self.state = if b == 0x1b {
+                        AltState::Esc
+                    } else {
+                        AltState::Ground
+                    };
+                }
+            }
+            AltState::PrivateParams => match b {
+                b'0'..=b'9' => {
+                    let d = u16::from(b - b'0');
+                    self.current = Some(
+                        self.current
+                            .unwrap_or(0)
+                            .saturating_mul(10)
+                            .saturating_add(d),
+                    );
+                }
+                b';' => {
+                    if self.params.len() < MAX_PARAMS {
+                        self.params.push(self.current.take().unwrap_or(0));
+                    } else {
+                        self.state = AltState::Ground;
+                    }
+                }
+                b'h' | b'l' => {
+                    if let Some(p) = self.current.take() {
+                        self.params.push(p);
+                    }
+                    if self.params.iter().any(|p| matches!(p, 1049 | 1047 | 47)) {
+                        self.active = b == b'h';
+                    }
+                    self.state = AltState::Ground;
+                }
+                0x1b => self.state = AltState::Esc,
+                _ => self.state = AltState::Ground,
+            },
         }
     }
 }
@@ -118,11 +175,31 @@ mod tests {
 
     #[test]
     fn alt_screen_variants() {
-        for on in NEEDLES_ON {
+        for on in [
+            &b"\x1b[?1049h"[..],
+            b"\x1b[?47h",
+            b"\x1b[?1047h",
+            b"\x1b[?2004;1049h",
+        ] {
             let mut a = AltScreenTracker::new();
             a.feed(on);
-            assert!(a.is_active());
+            assert!(a.is_active(), "{on:?}");
         }
+        // Other private modes don't count.
+        let mut a = AltScreenTracker::new();
+        a.feed(b"\x1b[?2004h\x1b[?25l\x1b[?104h");
+        assert!(!a.is_active());
+    }
+
+    #[test]
+    fn back_to_back_toggles_are_all_seen() {
+        let mut a = AltScreenTracker::new();
+        a.feed(b"\x1b[?47h\x1b[?47l");
+        assert!(!a.is_active());
+        a.feed(b"\x1b[?47l\x1b[?1049h");
+        assert!(a.is_active());
+        a.feed(b"\x1b[?1049;2004l");
+        assert!(!a.is_active());
     }
 
     #[test]
@@ -159,9 +236,9 @@ mod tests {
             }
             tracker.feed(&chunk);
             assert!(
-                tracker.tail.len() <= MAX_NEEDLE * 4,
-                "internal buffer grew unbounded: {} bytes",
-                tracker.tail.len()
+                tracker.params.len() <= MAX_PARAMS,
+                "parameter buffer grew unbounded: {}",
+                tracker.params.len()
             );
             let _ = tracker.is_active();
         }

@@ -431,3 +431,108 @@ fn remote_prompt_asks_first_in_confirm_mode() {
     p.send_line("exit").unwrap();
     p.exp_eof().unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Security regressions (see the audit findings these reproduce)
+// ---------------------------------------------------------------------------
+
+/// Pressing Ctrl-C at a password prompt and then typing an alias at the
+/// shell prompt must not send the secret to the shell (where it would be
+/// echoed, run as a command and saved in history).
+#[test]
+fn alias_after_ctrl_c_at_prompt_is_not_sent_to_shell() {
+    let env = setup_with_alias("proddb", "S3CRETVALUE");
+    let mut p = env.spawn_shell(15_000);
+    p.send_line("read -s -p 'Password: ' pw").unwrap();
+    p.exp_string("Password: ").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    p.send_control('c').unwrap();
+    p.exp_string("TESTPROMPT$ ").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    p.send("@proddb\r").unwrap();
+    p.flush().unwrap();
+    let out1 = p.exp_string("@proddb: command not found").unwrap();
+    p.send_line("history | tail -3; echo HIST$((1+1))END")
+        .unwrap();
+    let out2 = p.exp_string("HIST2END").unwrap();
+    for out in [&out1, &out2] {
+        assert!(!out.contains("S3CRETVALUE"), "secret leaked: {out:?}");
+    }
+    p.send_line("exit").unwrap();
+    p.exp_eof().unwrap();
+}
+
+/// If the prompt times out while an alias is being typed, the secret must
+/// not be sent to whatever reads the terminal afterwards.
+#[test]
+fn prompt_timeout_during_alias_sends_nothing() {
+    let env = setup_with_alias("proddb", "S3CRETVALUE");
+    let mut p = env.spawn_shell(15_000);
+    p.send_line("read -s -t 2 -p 'Password: ' pw; echo; echo RESULT[$pw]")
+        .unwrap();
+    p.exp_string("Password: ").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    p.send("@").unwrap();
+    p.flush().unwrap();
+    let out1 = p.exp_string("RESULT[]").unwrap();
+    p.send("proddb\r").unwrap();
+    p.flush().unwrap();
+    let out2 = p.exp_string("nothing was sent").unwrap();
+    p.send_line("history | tail -3; echo CHECK$((2+2))")
+        .unwrap();
+    let out3 = p.exp_string("CHECK4").unwrap();
+    for out in [&out1, &out2, &out3] {
+        assert!(!out.contains("S3CRETVALUE"), "secret leaked: {out:?}");
+    }
+    p.send_line("exit").unwrap();
+    p.exp_eof().unwrap();
+}
+
+/// `ssh host 'sudo -S ...'`, `ssh -T`, `kubectl exec -i`: the local
+/// terminal still echoes, so a remote-looking prompt must not get the
+/// secret (it would be printed on screen).
+#[test]
+fn remote_prompt_with_local_echo_on_gets_no_secret() {
+    let env = setup_with_alias("db", "pg-s3cret");
+    let bin = env.home.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let ssh = bin.join("ssh");
+    std::fs::write(
+        &ssh,
+        "#!/usr/bin/python3\n\
+         import sys\n\
+         sys.stdout.write('Password for user postgres: ')\n\
+         sys.stdout.flush()\n\
+         print('GOT[' + sys.stdin.readline().strip() + ']')\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut p = env.spawn_shell(15_000);
+    p.send_line(&ssh.display().to_string()).unwrap();
+    p.exp_string("Password for user postgres: ").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    p.send("@db\r").unwrap();
+    p.flush().unwrap();
+    let (before, got) = p.exp_regex(r"GOT\[[^\]]*\]").unwrap();
+    assert_eq!(got, "GOT[@db]");
+    assert!(!before.contains("pg-s3cret"), "secret leaked: {before:?}");
+    p.send_line("exit").unwrap();
+    p.exp_eof().unwrap();
+}
+
+/// A long output line of multi-byte characters used to crash the wrapper.
+#[test]
+fn long_multibyte_output_line_does_not_crash() {
+    let env = Env::fresh();
+    let mut p = env.spawn_shell(15_000);
+    p.send_line(
+        "printf '\u{e9}%0600d\\n' 0; printf '\u{65e5}%.0s' $(seq 400); echo; echo ALIVE$((3+4))",
+    )
+    .unwrap();
+    p.exp_string("ALIVE7").unwrap();
+    p.send_line("echo STILL$((4+4))").unwrap();
+    p.exp_string("STILL8").unwrap();
+    p.send_line("exit").unwrap();
+    p.exp_eof().unwrap();
+}

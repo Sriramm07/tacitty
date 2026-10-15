@@ -41,6 +41,18 @@ impl Env {
         cmd.env("XDG_RUNTIME_DIR", &self.runtime);
         cmd.env("TACITTY_TEST_WORK_FACTOR", "8");
         cmd.env_remove("TACITTY_ACTIVE");
+        // Keep everything inside the test's own HOME: never the
+        // developer's real config, vault or shell rc files.
+        for var in [
+            "ZDOTDIR",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "NO_TACITTY",
+            "TACITTY_RELEASES_URL",
+        ] {
+            cmd.env_remove(var);
+        }
         cmd
     }
 
@@ -79,7 +91,7 @@ impl Env {
 /// real scheduling-latency flakiness into otherwise-deterministic tests.
 impl Drop for Env {
     fn drop(&mut self) {
-        let sock = self.runtime.join("tacitty").join("agent.sock");
+        let sock = self.runtime.join("tacitty").join("agent-2.sock");
         if let Ok(mut c) = tacitty::agent::Client::connect(&sock) {
             let _ = c.lock();
         }

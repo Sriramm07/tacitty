@@ -129,6 +129,19 @@ impl PartialEq<&[u8]> for SecretBuf {
     }
 }
 
+/// Lets serializers (e.g. `serde_json::to_writer`) write straight into a
+/// self-wiping buffer, so encoded secrets never sit in an ordinary `Vec`.
+impl std::io::Write for SecretBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 impl fmt::Debug for SecretBuf {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "SecretBuf(<{} bytes redacted>)", self.len())

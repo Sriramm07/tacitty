@@ -42,6 +42,23 @@ impl Resolver {
     }
 
     pub fn resolve(&mut self, alias: &str) -> ResolveOutcome {
+        // Only well-formed alias names reach a backend (so nothing like
+        // `-x` or `../x` can end up in a `pass` path or command template).
+        if crate::alias::validate(alias).is_err() {
+            return ResolveOutcome::NotFound;
+        }
+        let outcome = self.lookup(alias);
+        // Whatever the source, never send something the terminal would
+        // interpret rather than pass through as text.
+        if let ResolveOutcome::Found(secret) = &outcome {
+            if let Err(e) = crate::vault::validate_secret(secret.as_slice()) {
+                return ResolveOutcome::Error(e);
+            }
+        }
+        outcome
+    }
+
+    fn lookup(&mut self, alias: &str) -> ResolveOutcome {
         match self.cfg.backend {
             BackendKind::Native => {
                 let client = match self.client() {
@@ -66,5 +83,60 @@ impl Resolver {
     pub fn unlock(&mut self, passphrase: &SecretString) -> Result<(), String> {
         let client = self.client()?;
         client.unlock(passphrase).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn command_resolver(get: &str) -> Resolver {
+        let mut cfg = Config {
+            backend: BackendKind::Command,
+            ..Default::default()
+        };
+        cfg.command.get = get.to_string();
+        Resolver::new(cfg).unwrap()
+    }
+
+    #[test]
+    fn plain_secret_from_command_is_found() {
+        match command_resolver("printf abc").resolve("x") {
+            ResolveOutcome::Found(s) => assert_eq!(s.as_slice(), b"abc"),
+            _ => panic!("expected Found"),
+        }
+    }
+
+    #[test]
+    fn crlf_line_ending_is_stripped() {
+        match command_resolver(r"printf abc\r\n").resolve("x") {
+            ResolveOutcome::Found(s) => assert_eq!(s.as_slice(), b"abc"),
+            _ => panic!("expected Found"),
+        }
+    }
+
+    #[test]
+    fn control_characters_are_never_sent() {
+        for bad in [
+            r"printf ab\032cd",
+            r"printf ab\003cd",
+            r"printf ab\033cd",
+            r"printf ab\tcd",
+        ] {
+            assert!(
+                matches!(command_resolver(bad).resolve("x"), ResolveOutcome::Error(_)),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_aliases_never_reach_a_backend() {
+        for alias in ["-x", "../x", "", "a b"] {
+            assert!(matches!(
+                command_resolver("printf abc").resolve(alias),
+                ResolveOutcome::NotFound
+            ));
+        }
     }
 }

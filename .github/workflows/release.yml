@@ -64,7 +64,7 @@ jobs:
         run: |
           name="tacitty-${GITHUB_REF_NAME}-${TARGET}"
           mkdir -p "dist/$name"
-          cp "target/${TARGET}/release/tacitty" README.md LICENSE "dist/$name/"
+          cp "target/${TARGET}/release/tacitty" README.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
           rm -rf "dist/$name"

@@ -11,7 +11,7 @@ Type `@proddb` at any password prompt and the real secret is sent instead.
 [![Release](https://img.shields.io/github/v/release/Sriramm07/tacitty?color=8b5cf6)](https://github.com/Sriramm07/tacitty/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Linux-0ea5e9)](#-install)
 [![Rust](https://img.shields.io/badge/built%20with-Rust-f97316)](https://www.rust-lang.org)
-[![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial-64748b)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-64748b)](#-license)
 
 <img src="assets/demo.gif" alt="tacitty demo: unlock the vault, ssh to a server with @admin, become root with @root, then open PostgreSQL with @pgdb" width="860">
 
@@ -374,16 +374,17 @@ for the fuzz targets.
 
 Copyright © 2026 Sriram P.
 
-taciTTY is source-available under the
-[PolyForm Noncommercial License 1.0.0](LICENSE).
+taciTTY is free and open source, licensed under either of
 
-| ✅ Allowed | ❌ Not allowed |
-|---|---|
-| Personal use, hobby projects, study and research | Selling it, or bundling it into a paid product or service |
-| Use by charities, schools and government bodies | Using it inside a for-profit business |
-| Modifying and sharing it for noncommercial purposes | |
+- [MIT license](LICENSE-MIT), or
+- [Apache License, Version 2.0](LICENSE-APACHE)
 
-For a commercial license, contact **sriram_297@yahoo.com**.
+at your option. You can use it anywhere, including at work and in
+commercial settings.
+
+Unless you explicitly state otherwise, any contribution you intentionally
+submit for inclusion in taciTTY, as defined in the Apache-2.0 license, is
+dual-licensed as above, without any additional terms or conditions.
 
 ## 🤖 AI disclosure
 

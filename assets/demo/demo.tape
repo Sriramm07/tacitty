@@ -39,7 +39,7 @@ Type "clear" Enter
 Sleep 300ms
 Type "# 2. Save the root password under an alias" Enter
 Sleep 300ms
-Type "tacitty add root-pw" Enter
+Type "tacitty add rootpw" Enter
 Wait+Screen /Secret:/
 Sleep 400ms
 Type "correct-horse-42" Enter
@@ -49,7 +49,7 @@ Type "correct-horse-42" Enter
 Wait+Screen /Master passphrase:/
 Sleep 300ms
 Type "my vault passphrase" Enter
-Wait+Screen /Saved @root-pw/
+Wait+Screen /Saved @rootpw/
 Sleep 1.8s
 
 Type "clear" Enter
@@ -59,12 +59,12 @@ Sleep 300ms
 Type "bash" Enter
 Sleep 1s
 
-Type "# 4. At a real password prompt, type @root-pw (hidden, like any password)" Enter
+Type "# 4. At a real password prompt, type @rootpw (hidden, like any password)" Enter
 Sleep 300ms
 Type "su -" Enter
 Wait+Screen /Password:/
 Sleep 600ms
-Type "@root-pw" Enter
+Type "@rootpw" Enter
 Wait+Screen /unlock vault/
 Sleep 600ms
 Type "my vault passphrase" Enter
@@ -75,7 +75,7 @@ Sleep 1.6s
 Type "exit" Enter
 Sleep 600ms
 
-Type "# 5. Anywhere else, @root-pw is just text" Enter
+Type "# 5. Anywhere else, @rootpw is just text" Enter
 Sleep 300ms
-Type "echo @root-pw" Enter
+Type "echo @rootpw" Enter
 Sleep 3s

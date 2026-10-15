@@ -3,7 +3,7 @@
 # 🔐 tacitty
 
 **Password aliases for your terminal.**<br>
-Type `@prod-db` at any password prompt and the real secret is sent instead.
+Type `@proddb` at any password prompt and the real secret is sent instead.
 
 [![CI](https://github.com/Sriramm07/tacitty/actions/workflows/ci.yml/badge.svg)](https://github.com/Sriramm07/tacitty/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Sriramm07/tacitty?color=8b5cf6)](https://github.com/Sriramm07/tacitty/releases/latest)
@@ -11,7 +11,7 @@ Type `@prod-db` at any password prompt and the real secret is sent instead.
 [![Rust](https://img.shields.io/badge/built%20with-Rust-f97316)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial-64748b)](LICENSE)
 
-<img src="assets/demo.gif" alt="tacitty demo: create a vault, save the root password as @root-pw, then type @root-pw at a real su password prompt" width="860">
+<img src="assets/demo.gif" alt="tacitty demo: create a vault, save the root password as @rootpw, then type @rootpw at a real su password prompt" width="860">
 
 </div>
 
@@ -25,7 +25,7 @@ surfers. tacitty lets you type a short, memorable alias instead. It works at
 **any** terminal password prompt: `sudo`, `su`, `ssh`, `psql`, `mysql`,
 `gpg`, `read -s`, Python's `getpass` and more.
 
-- 🎯 **Only at real password prompts.** Type `@prod-db` in a normal shell
+- 🎯 **Only at real password prompts.** Type `@proddb` in a normal shell
   line, in `vim` or in `less`, and it stays plain text.
 - 🔒 **Local and encrypted.** Secrets live in an
   [`age`](https://github.com/str4d/rage)-encrypted vault on your machine.
@@ -47,14 +47,14 @@ curl -fsSL https://raw.githubusercontent.com/Sriramm07/tacitty/main/install.sh |
 tacitty init
 
 # 3. Save a secret under an alias
-tacitty add prod-db
+tacitty add proddb
 ```
 
 Open a new terminal, and use it at any password prompt:
 
 ```console
 $ sudo systemctl restart nginx
-[sudo] password for sriram: @prod-db⏎     ← nothing is shown; sudo receives the real password
+[sudo] password for sriram: @proddb⏎     ← nothing is shown; sudo receives the real password
 ```
 
 The first time you use an alias in a session, tacitty asks for your master
@@ -90,7 +90,7 @@ new binary runs before replacing the old one.
  you type ──► tacitty (pty wrapper) ──► sudo / ssh / psql / ...
                │
                ├─ normal line?           pass every key through untouched
-               └─ password prompt?       "@prod-db⏎"  ──►  real secret + ⏎
+               └─ password prompt?       "@proddb⏎"  ──►  real secret + ⏎
                      ▲
                      └── is the terminal in "hidden input" mode right now?
 ```

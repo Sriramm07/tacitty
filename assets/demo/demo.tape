@@ -2,80 +2,119 @@
 Output assets/demo.gif
 
 Require tacitty
+Require ssh
 
 Set Shell "bash"
 Set FontFamily "JetBrains Mono"
 Set FontSize 18
 Set Width 1280
-Set Height 600
+Set Height 840
 Set Padding 26
 Set Theme "Catppuccin Mocha"
 Set WindowBar Colorful
 Set BorderRadius 10
-Set TypingSpeed 40ms
+Set TypingSpeed 70ms
 
-# Switch to the demo user off-camera.
+# Off camera: become the demo user, create the vault and three aliases
+# (@admin, @root, @pgdb), then open a new shell, which auto-starts tacitty.
 Hide
 Type "su - sriram" Enter
 Sleep 800ms
-Type "clear" Enter
-Sleep 400ms
-Show
-
-Sleep 600ms
-Type "# 1. Create your encrypted vault" Enter
-Sleep 300ms
 Type "tacitty init" Enter
 Wait+Screen /New master passphrase/
-Sleep 500ms
 Type "my vault passphrase" Enter
 Wait+Screen /Confirm master passphrase/
-Sleep 300ms
 Type "my vault passphrase" Enter
 Wait+Screen /store your first secret/
-Sleep 2.5s
-
-Type "clear" Enter
-Sleep 300ms
-Type "# 2. Save the root password under an alias" Enter
-Sleep 300ms
-Type "tacitty add rootpw" Enter
+Type "clear; tacitty add admin" Enter
 Wait+Screen /Secret:/
-Sleep 400ms
-Type "correct-horse-42" Enter
+Type "Adm1n-Ssh-2026" Enter
 Wait+Screen /Confirm secret:/
-Sleep 300ms
-Type "correct-horse-42" Enter
+Type "Adm1n-Ssh-2026" Enter
 Wait+Screen /Master passphrase:/
-Sleep 300ms
 Type "my vault passphrase" Enter
-Wait+Screen /Saved @rootpw/
-Sleep 1.8s
-
-Type "clear" Enter
-Sleep 300ms
-Type "# 3. Open a new terminal: tacitty is already running" Enter
-Sleep 300ms
+Wait+Screen /Saved @admin/
+Type "clear; tacitty add root" Enter
+Wait+Screen /Secret:/
+Type "R00t-Pr0d-2026" Enter
+Wait+Screen /Confirm secret:/
+Type "R00t-Pr0d-2026" Enter
+Wait+Screen /Master passphrase:/
+Type "my vault passphrase" Enter
+Wait+Screen /Saved @root/
+Type "clear; tacitty add pgdb" Enter
+Wait+Screen /Secret:/
+Type "Pg-Pr0d-2026" Enter
+Wait+Screen /Confirm secret:/
+Type "Pg-Pr0d-2026" Enter
+Wait+Screen /Master passphrase:/
+Type "my vault passphrase" Enter
+Wait+Screen /Saved @pgdb/
 Type "bash" Enter
 Sleep 1s
+Type "clear" Enter
+Sleep 500ms
+Show
 
-Type "# 4. At a real password prompt, type @rootpw (hidden, like any password)" Enter
+Sleep 500ms
+Type "# 1. Unlock your vault once" Enter
+Sleep 300ms
+Type "tacitty unlock" Enter
+Wait+Screen /Master passphrase/
+Sleep 400ms
+Type "my vault passphrase" Enter
+Wait+Screen /Unlocked/
+Sleep 2.8s
+
+Type "# 2. SSH in: type @admin at the password prompt (hidden, like any password)" Enter
+Sleep 300ms
+Type "ssh admin@10.42.0.15" Enter
+Wait+Screen /password:/
+Sleep 1.8s
+Type "@admin" Enter
+Wait+Screen /admin@db-prod/
+Sleep 3.2s
+
+Type "# 3. Become root: @root" Enter
 Sleep 300ms
 Type "su -" Enter
 Wait+Screen /Password:/
-Sleep 600ms
-Type "@rootpw" Enter
-Wait+Screen /unlock vault/
-Sleep 600ms
-Type "my vault passphrase" Enter
-Wait+Screen /root .*#/
-Sleep 500ms
-Type "whoami" Enter
-Sleep 1.6s
-Type "exit" Enter
-Sleep 600ms
+Sleep 1.8s
+Type "@root" Enter
+Wait+Screen /root@db-prod/
+Sleep 3.2s
 
-Type "# 5. Anywhere else, @rootpw is just text" Enter
+Type "# 4. Open the database as postgres: @pgdb" Enter
 Sleep 300ms
-Type "echo @rootpw" Enter
-Sleep 3s
+Type "su - postgres" Enter
+Wait+Screen /postgres@db-prod/
+Sleep 500ms
+Type "psql -h 127.0.0.1 -U postgres" Enter
+Wait+Screen /Password for user postgres/
+Sleep 1.8s
+Type "@pgdb" Enter
+Wait+Screen /postgres=#/
+Sleep 2.2s
+Type "\conninfo" Enter
+Sleep 4.5s
+
+# Back out to the laptop.
+Type "\q" Enter
+Wait+Line /postgres@db-prod/
+Sleep 300ms
+Type "exit" Enter
+Wait+Line /root@db-prod/
+Sleep 300ms
+Type "exit" Enter
+Wait+Line /admin@db-prod/
+Sleep 300ms
+Type "exit" Enter
+Wait+Line /sriram/
+Sleep 1.8s
+Type "clear" Enter
+Sleep 300ms
+
+Type "# 5. Everywhere else, @admin is just text" Enter
+Sleep 300ms
+Type "echo @admin" Enter
+Sleep 5s

@@ -11,7 +11,7 @@ Type `@proddb` at any password prompt and the real secret is sent instead.
 [![Rust](https://img.shields.io/badge/built%20with-Rust-f97316)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial-64748b)](LICENSE)
 
-<img src="assets/demo.gif" alt="tacitty demo: create a vault, save the root password as @rootpw, then type @rootpw at a real su password prompt" width="860">
+<img src="assets/demo.gif" alt="tacitty demo: unlock the vault, ssh to a server with @admin, become root with @root, then open PostgreSQL with @pgdb" width="860">
 
 </div>
 
@@ -308,7 +308,9 @@ for the fuzz targets.
   `tacitty update` install from these.
 - **Arch Linux:** `packaging/PKGBUILD`.
 - **Demo GIF:** recorded with [VHS](https://github.com/charmbracelet/vhs)
-  from [`assets/demo/demo.tape`](assets/demo/demo.tape). Re-record with
+  from [`assets/demo/demo.tape`](assets/demo/demo.tape), against a
+  throwaway Debian 13 server running sshd and PostgreSQL
+  ([`assets/demo/server`](assets/demo/server/Dockerfile)). Re-record with
   `sh assets/demo/record.sh` (needs Docker).
 
 </details>

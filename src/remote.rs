@@ -140,8 +140,8 @@ mod tests {
         let re = Regex::new(r"(?i)(password|passphrase|passcode|pin)[^\n]*:\s*$").unwrap();
         for line in [
             "Password: ",
-            "[sudo] password for alice: ",
-            "Enter passphrase for key '/home/alice/.ssh/id_ed25519': ",
+            "[sudo] password for sriram: ",
+            "Enter passphrase for key '/home/sriram/.ssh/id_ed25519': ",
             "PIN: ",
         ] {
             assert!(looks_like_prompt(&re, line), "{line:?}");

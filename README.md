@@ -54,7 +54,7 @@ Open a new terminal, and use it at any password prompt:
 
 ```console
 $ sudo systemctl restart nginx
-[sudo] password for alice: @prod-db⏎      ← nothing is shown; sudo receives the real password
+[sudo] password for sriram: @prod-db⏎     ← nothing is shown; sudo receives the real password
 ```
 
 The first time you use an alias in a session, tacitty asks for your master

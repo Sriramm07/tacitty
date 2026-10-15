@@ -25,8 +25,22 @@ main() {
         fetch() { curl --proto '=https' --proto-redir '=https' -fsSL -o "$2" "$1"; }
         final_url() { curl --proto '=https' --proto-redir '=https' -fsSLI -o /dev/null -w '%{url_effective}' "$1"; }
     elif command -v wget >/dev/null 2>&1; then
-        fetch() { wget --https-only -q -O "$2" "$1"; }
-        final_url() { wget --https-only -q -S --spider "$1" 2>&1 | sed -n 's/^ *[Ll]ocation: *//p' | tail -1 | tr -d '\r'; }
+        # wget's --https-only doesn't cover redirects, so follow the chain
+        # ourselves: every hop must be HTTPS, then fetch the final address
+        # with redirects turned off.
+        final_url() {
+            hops="$(wget -q -S --spider "$1" 2>&1 | sed -n 's/^ *[Ll]ocation: *//p' | tr -d '\r')" ||
+                return 1
+            for hop in $hops; do
+                case "$hop" in https://*) ;; *) die "refusing a non-HTTPS redirect: $hop" ;; esac
+            done
+            last="$(printf '%s\n' "$hops" | tail -1)"
+            if [ -n "$last" ]; then printf '%s' "$last"; else printf '%s' "$1"; fi
+        }
+        fetch() {
+            target="$(final_url "$1")" || return 1
+            wget -q --max-redirect=0 -O "$2" "$target"
+        }
     else
         die "need curl or wget"
     fi

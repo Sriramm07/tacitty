@@ -102,6 +102,12 @@ impl StateMachine {
         !matches!(self.state, State::Passthrough { .. })
     }
 
+    /// True when nothing has been typed on the current line yet: the only
+    /// place where typing the trigger can start a capture.
+    pub fn at_line_start(&self) -> bool {
+        matches!(self.state, State::Passthrough { line_len: 0 })
+    }
+
     /// Explicitly abandon any in-progress capture (buffer is zeroized via
     /// `SecretBuf`'s `Drop`). Used when secret_mode drops mid-line.
     pub fn reset(&mut self) {

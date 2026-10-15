@@ -115,11 +115,15 @@ impl Fetcher {
                 c
             }
             Fetcher::Wget => {
+                // wget has no reliable "HTTPS only, even across redirects"
+                // switch (`--https-only` only affects recursive downloads),
+                // so resolve the redirect chain first, check every hop, and
+                // then fetch the final address with redirects turned off.
+                let target = self.final_url(url)?;
                 let mut c = Command::new("wget");
-                if https_only() {
-                    c.arg("--https-only");
-                }
-                c.args(["-q", "-O"]).arg(dest).arg(url);
+                c.args(["-q", "--max-redirect=0", "-O"])
+                    .arg(dest)
+                    .arg(target);
                 c
             }
         };
@@ -133,7 +137,8 @@ impl Fetcher {
         Ok(())
     }
 
-    /// The URL `url` finally redirects to.
+    /// The URL `url` finally redirects to. In normal builds every hop must
+    /// be HTTPS.
     fn final_url(&self, url: &str) -> Result<String> {
         let out = match self {
             Fetcher::Curl => {
@@ -145,35 +150,46 @@ impl Fetcher {
                     .stdin(Stdio::null())
                     .output()
             }
-            Fetcher::Wget => {
-                let mut c = Command::new("wget");
-                if https_only() {
-                    c.arg("--https-only");
-                }
-                c.args(["-q", "-S", "--spider", url])
-                    .stdin(Stdio::null())
-                    .output()
-            }
+            Fetcher::Wget => Command::new("wget")
+                .args(["-q", "-S", "--spider", url])
+                .stdin(Stdio::null())
+                .output(),
         }
         .context("running the downloader")?;
         if !out.status.success() {
             bail!("could not reach {url}");
         }
-        Ok(match self {
-            Fetcher::Curl => String::from_utf8_lossy(&out.stdout).into_owned(),
-            // wget prints response headers on stderr; the last Location wins.
-            Fetcher::Wget => String::from_utf8_lossy(&out.stderr)
-                .lines()
-                .rev()
-                .find_map(|l| {
-                    let l = l.trim();
-                    l.get(..9)
-                        .filter(|p| p.eq_ignore_ascii_case("location:"))
-                        .map(|_| l[9..].trim().to_string())
-                })
-                .unwrap_or_default(),
-        })
+        let final_url = match self {
+            Fetcher::Curl => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            Fetcher::Wget => {
+                // wget prints response headers on stderr, one block per hop.
+                let hops = redirect_locations(&String::from_utf8_lossy(&out.stderr));
+                if https_only() {
+                    if let Some(bad) = hops.iter().find(|h| !h.starts_with("https://")) {
+                        bail!("refusing a non-HTTPS redirect: {bad}");
+                    }
+                }
+                hops.last().cloned().unwrap_or_else(|| url.to_string())
+            }
+        };
+        if https_only() && !final_url.starts_with("https://") {
+            bail!("refusing a non-HTTPS address: {final_url}");
+        }
+        Ok(final_url)
     }
+}
+
+/// Every `Location:` header in wget's `-S` output, in order.
+fn redirect_locations(headers: &str) -> Vec<String> {
+    headers
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            l.get(..9)
+                .filter(|p| p.eq_ignore_ascii_case("location:"))
+                .map(|_| l[9..].trim().to_string())
+        })
+        .collect()
 }
 
 fn on_path(bin: &str) -> bool {
@@ -386,6 +402,19 @@ mod tests {
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    #[test]
+    fn redirect_chain_is_parsed_in_order() {
+        let headers = "  HTTP/1.1 302 Found\n  Location: https://a.example/x\n  HTTP/1.1 302 Found\n  location: http://b.example/y\r\n  HTTP/1.1 200 OK\n";
+        assert_eq!(
+            redirect_locations(headers),
+            vec![
+                "https://a.example/x".to_string(),
+                "http://b.example/y".to_string()
+            ]
+        );
+        assert!(redirect_locations("  HTTP/1.1 200 OK\n").is_empty());
     }
 
     #[test]

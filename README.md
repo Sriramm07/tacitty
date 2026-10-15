@@ -87,8 +87,9 @@ Linux distribution.
 whether a newer version exists. It verifies the checksum and makes sure the
 new binary runs before replacing the old one.
 
-**Verifying a download (optional):** every release file comes with a
-build-provenance attestation, signed through GitHub, that proves it was
+**Verifying a download (optional):** every release archive (`.tar.gz`)
+comes with a build-provenance attestation, signed through GitHub, that
+proves it was
 built from this repository by its release workflow. With the
 [GitHub CLI](https://cli.github.com):
 
@@ -233,6 +234,12 @@ get = "bw get password {alias}"
 | **`secret-service`** | GNOME Keyring / KWallet via `secret-tool` | `tacitty add` can write here too. |
 | **`command`** | Any command you configure | `{alias}` is substituted, the first line of output is the secret. Run directly, never through a shell, so alias text can't inject commands. |
 
+Helper programs (`pass`, `secret-tool`, `command`) run without access to
+your terminal and are stopped after 30 seconds, so they can't prompt you
+for anything. Unlock their stores beforehand if they need it (for example
+`bw unlock` for Bitwarden). Secrets containing control characters are
+refused from every backend.
+
 </details>
 
 ## 🛡️ Security
@@ -240,7 +247,9 @@ get = "bw get password {alias}"
 **Protects against:** shoulder surfing; shell history; clipboard sniffers
 and clipboard managers; keyloggers watching injected keystrokes (there are
 none); expanding an alias into the wrong program; secrets ending up in
-logs, core dumps, swap or terminal scrollback.
+logs, core dumps or terminal scrollback. It also reduces, but can't rule
+out, secrets being written to swap: memory locking is best effort, and
+some buffers inside the encryption library aren't locked.
 
 **Out of scope:** a compromised root account; malicious software running as
 your own user that can attach a debugger to taciTTY (made harder, but not
@@ -283,8 +292,9 @@ prevented); someone who can overwrite the vault or config files.
   banned from the dependency tree; all cryptography is pure Rust (`age`,
   `chacha20poly1305`, `scrypt`).
 - Releases are built by GitHub Actions with read-only permissions, every
-  third-party action is pinned to an exact commit, and each release file
-  has a signed build-provenance attestation (see [Install](#-install)).
+  third-party action is pinned to an exact commit, and each release
+  archive has a signed build-provenance attestation (see
+  [Install](#-install)).
 - `tacitty update` and `install.sh` only download over HTTPS and verify each
   file's SHA-256 checksum before installing it.
 
@@ -312,6 +322,10 @@ prevented); someone who can overwrite the vault or config files.
 - A program can print its prompt a split second before it actually hides
   input. taciTTY briefly re-checks right after new output to narrow this
   window, but extremely fast or scripted input could still land in it.
+- The "is the prompt still there?" check happens immediately before the
+  secret is written. A prompt that ends in the tiny gap between that check
+  and the write (well under a millisecond) can't be detected; no program
+  outside the kernel can close that gap completely.
 - Windows and macOS aren't supported. GUI apps and browser forms are out of
   scope; taciTTY is not a full password manager.
 

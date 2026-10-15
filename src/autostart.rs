@@ -13,7 +13,7 @@
 
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -183,12 +183,33 @@ fn target_shells() -> Result<Vec<Shell>> {
 fn write_rc(path: &Path, content: &str) -> Result<()> {
     let target = match fs::canonicalize(path) {
         Ok(real) => real,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Missing is fine (we create it), but a symlink pointing
+            // nowhere is the user's setup; don't replace it with a file.
+            if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+                bail!(
+                    "{} is a symlink to a file that doesn't exist; fix or remove it and try again",
+                    path.display()
+                );
+            }
+            path.to_path_buf()
+        }
         Err(e) => return Err(e).with_context(|| format!("resolving {}", path.display())),
     };
-    let mode = fs::metadata(&target)
-        .map(|m| m.permissions().mode() & 0o7777)
-        .unwrap_or(0o644);
+    let mode = match fs::metadata(&target) {
+        Ok(m) => {
+            // Rename would replace even a read-only or someone else's file;
+            // refuse instead, as a normal in-place write would.
+            if m.uid() != crate::sys::geteuid() {
+                bail!("{} is not owned by you; not changing it", target.display());
+            }
+            if m.permissions().mode() & 0o200 == 0 {
+                bail!("{} is read-only; not changing it", target.display());
+            }
+            m.permissions().mode() & 0o7777
+        }
+        Err(_) => 0o644,
+    };
     let dir = target.parent().context("rc file has no parent directory")?;
     let name = target
         .file_name()

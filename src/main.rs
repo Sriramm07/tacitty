@@ -15,6 +15,36 @@ use tacitty::update;
 use tacitty::vault;
 use tacitty::wrapper::{self, RunOptions};
 
+/// `println!`, except that a closed stdout (`tacitty ls | head -1`) ends the
+/// program quietly, the way command-line tools normally do, instead of
+/// panicking.
+macro_rules! outln {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        if let Err(e) = writeln!(std::io::stdout(), $($arg)*) {
+            stdout_failed(e)
+        }
+    }};
+}
+
+/// `print!` with the same handling as [`outln!`].
+macro_rules! out {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        if let Err(e) = write!(std::io::stdout(), $($arg)*) {
+            stdout_failed(e)
+        }
+    }};
+}
+
+fn stdout_failed(e: std::io::Error) -> ! {
+    if e.kind() == std::io::ErrorKind::BrokenPipe {
+        std::process::exit(141); // what a shell reports for SIGPIPE
+    }
+    eprintln!("tacitty: writing output: {e}");
+    std::process::exit(1);
+}
+
 #[derive(Parser)]
 #[command(
     name = "tacitty",
@@ -94,12 +124,11 @@ fn main() -> Result<()> {
     // Every command may hold the decrypted vault or the master passphrase
     // in memory, so all of them refuse core dumps and debugger attachment.
     sys::harden_process();
+    // Writes to a closed pipe (a helper program, the agent socket, or
+    // stdout) return an error instead of killing the process; stdout is
+    // handled by `outln!` / `out!`.
+    sys::ignore_sigpipe();
     let cli = Cli::parse();
-    match cli.cmd {
-        // The wrapper and the agent handle write errors themselves.
-        Cmd::Shell { .. } | Cmd::Agent { .. } => sys::ignore_sigpipe(),
-        _ => sys::default_sigpipe(),
-    }
     let code = match cli.cmd {
         Cmd::Init { no_autostart } => cmd_init(no_autostart),
         Cmd::Add {
@@ -132,10 +161,10 @@ fn main() -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn read_passphrase(prompt: &str) -> Result<SecretString> {
-    print!("{prompt}");
+    out!("{prompt}");
     std::io::stdout().flush().ok();
     let buf = read_secret_from_tty()?;
-    println!();
+    outln!();
     Ok(SecretString::from(
         String::from_utf8_lossy(buf.as_slice()).into_owned(),
     ))
@@ -231,7 +260,7 @@ fn cmd_init(no_autostart: bool) -> Result<i32> {
     }
     let pass = confirm_passphrase()?;
     vault::create(&path, &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
-    println!("Created vault at {}", path.display());
+    outln!("Created vault at {}", path.display());
     if !no_autostart {
         // The vault exists at this point; an rc-file problem shouldn't make
         // init look like it failed.
@@ -240,16 +269,16 @@ fn cmd_init(no_autostart: bool) -> Result<i32> {
             Err(e) => eprintln!("tacitty: could not enable auto-start: {e:#}"),
         }
     }
-    println!("Run `tacitty add <alias>` to store your first secret.");
+    outln!("Run `tacitty add <alias>` to store your first secret.");
     Ok(0)
 }
 
 fn print_enabled(files: &[std::path::PathBuf]) {
     for f in files {
-        println!("Auto-start enabled in {}", f.display());
+        outln!("Auto-start enabled in {}", f.display());
     }
-    println!("New terminals now start inside tacitty.");
-    println!("Run `tacitty disable` to turn this off (or set NO_TACITTY=1 for one shell).");
+    outln!("New terminals now start inside tacitty.");
+    outln!("Run `tacitty disable` to turn this off (or set NO_TACITTY=1 for one shell).");
 }
 
 fn cmd_enable() -> Result<i32> {
@@ -260,13 +289,13 @@ fn cmd_enable() -> Result<i32> {
 fn cmd_disable() -> Result<i32> {
     let files = autostart::disable()?;
     if files.is_empty() {
-        println!("Auto-start was not enabled.");
+        outln!("Auto-start was not enabled.");
     }
     for f in &files {
-        println!("Auto-start removed from {}", f.display());
+        outln!("Auto-start removed from {}", f.display());
     }
     if !files.is_empty() {
-        println!(
+        outln!(
             "New terminals will start your normal shell. Run `tacitty enable` to turn it back on."
         );
     }
@@ -282,7 +311,7 @@ fn cmd_add(alias_name: &str, generate: bool, length: usize) -> Result<i32> {
 
     let secret = if generate {
         let secret = generate_secret(length)?;
-        println!(
+        outln!(
             "Generated a {}-character secret for @{alias_name}.",
             secret.len()
         );
@@ -311,11 +340,11 @@ fn cmd_add(alias_name: &str, generate: bool, length: usize) -> Result<i32> {
         if let Ok(mut c) = Client::connect(&config::agent_sock_path()?) {
             let _ = c.lock();
         }
-        println!("Saved @{alias_name}.");
+        outln!("Saved @{alias_name}.");
     } else if cfg.backend == tacitty::backend::BackendKind::SecretService {
         tacitty::backend::secret_service_put(alias_name, secret.as_slice())
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        println!("Saved @{alias_name} to the Secret Service keyring.");
+        outln!("Saved @{alias_name} to the Secret Service keyring.");
     } else {
         bail!(
             "`tacitty add` only writes to the native or secret-service backends; \
@@ -326,10 +355,10 @@ fn cmd_add(alias_name: &str, generate: bool, length: usize) -> Result<i32> {
 }
 
 fn read_secret_prompted(prompt: &str) -> Result<SecretBuf> {
-    print!("{prompt}");
+    out!("{prompt}");
     std::io::stdout().flush().ok();
     let s = read_secret_from_tty()?;
-    println!();
+    outln!();
     Ok(s)
 }
 
@@ -368,7 +397,7 @@ fn cmd_rm(alias_name: &str) -> Result<i32> {
     if let Ok(mut c) = agent_client(&load_config()?) {
         let _ = c.lock();
     }
-    println!("Removed @{alias_name}.");
+    outln!("Removed @{alias_name}.");
     Ok(0)
 }
 
@@ -386,7 +415,7 @@ fn cmd_mv(old: &str, new: &str) -> Result<i32> {
     if let Ok(mut c) = agent_client(&load_config()?) {
         let _ = c.lock();
     }
-    println!("Renamed @{old} to @{new}.");
+    outln!("Renamed @{old} to @{new}.");
     Ok(0)
 }
 
@@ -394,17 +423,17 @@ fn cmd_ls() -> Result<i32> {
     let cfg = load_config()?;
     let path = config::vault_path()?;
     if !vault::exists(&path) {
-        println!("(no vault yet — run `tacitty init`)");
+        outln!("(no vault yet — run `tacitty init`)");
         return Ok(0);
     }
     let pass = read_passphrase("Master passphrase: ")?;
     let data = vault::load(&path, &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
     if data.entries.is_empty() {
-        println!("(no aliases yet — run `tacitty add <alias>`)");
+        outln!("(no aliases yet — run `tacitty add <alias>`)");
         return Ok(0);
     }
     for (alias_name, e) in &data.entries {
-        println!(
+        outln!(
             "{:<32}  created {}  updated {}",
             format!("@{alias_name}"),
             fmt_time(e.created),
@@ -445,14 +474,14 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 fn cmd_update(check: bool) -> Result<i32> {
     match update::run(check)? {
         update::Outcome::UpToDate { current } => {
-            println!("tacitty {current} is already the latest version.")
+            outln!("tacitty {current} is already the latest version.")
         }
         update::Outcome::Available { current, latest } => {
-            println!("tacitty {latest} is available (you have {current}). Run `tacitty update` to install it.")
+            outln!("tacitty {latest} is available (you have {current}). Run `tacitty update` to install it.")
         }
         update::Outcome::Updated { from, to, path } => {
-            println!("Updated tacitty {from} -> {to} at {}.", path.display());
-            println!("New terminals use it right away; already-open ones keep the old version until closed.");
+            outln!("Updated tacitty {from} -> {to} at {}.", path.display());
+            outln!("New terminals use it right away; already-open ones keep the old version until closed.");
         }
     }
     Ok(0)
@@ -502,7 +531,7 @@ fn cmd_lock() -> Result<i32> {
     let cfg = load_config()?;
     let mut client = agent_client(&cfg)?;
     client.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
-    println!("Locked.");
+    outln!("Locked.");
     Ok(0)
 }
 
@@ -510,7 +539,7 @@ fn cmd_unlock() -> Result<i32> {
     let cfg = load_config()?;
     let mut client = agent_client(&cfg)?;
     ensure_unlocked(&mut client)?;
-    println!("Unlocked.");
+    outln!("Unlocked.");
     Ok(0)
 }
 
@@ -519,16 +548,16 @@ fn cmd_status() -> Result<i32> {
     match agent_client(&cfg) {
         Ok(mut c) => match c.status() {
             Ok((true, idle)) => {
-                println!(
+                outln!(
                     "unlocked (idle {}s, auto-lock after {}m)",
                     idle.unwrap_or(0),
                     cfg.idle_lock_minutes
                 );
             }
-            Ok((false, _)) => println!("locked"),
-            Err(e) => println!("agent reachable but errored: {e}"),
+            Ok((false, _)) => outln!("locked"),
+            Err(e) => outln!("agent reachable but errored: {e}"),
         },
-        Err(_) => println!("agent not running"),
+        Err(_) => outln!("agent not running"),
     }
     Ok(0)
 }
@@ -537,44 +566,44 @@ fn cmd_doctor() -> Result<i32> {
     let cfg = load_config()?;
     let mut ok = true;
 
-    println!("tacitty doctor");
-    println!("==============");
+    outln!("tacitty doctor");
+    outln!("==============");
 
     // termios detection sanity: are we even on a tty?
     if sys::isatty(0) {
-        println!("[ok]   stdin is a tty");
+        outln!("[ok]   stdin is a tty");
     } else {
-        println!("[warn] stdin is not a tty (run this interactively for a full check)");
+        outln!("[warn] stdin is not a tty (run this interactively for a full check)");
     }
 
     match config::config_path() {
-        Ok(p) => println!("[ok]   config path: {}", p.display()),
+        Ok(p) => outln!("[ok]   config path: {}", p.display()),
         Err(e) => {
-            println!("[fail] config path: {e}");
+            outln!("[fail] config path: {e}");
             ok = false;
         }
     }
     if let Err(e) = cfg.validate() {
-        println!("[fail] config: {e}");
+        outln!("[fail] config: {e}");
         ok = false;
     } else {
-        println!("[ok]   config parses and validates");
+        outln!("[ok]   config parses and validates");
     }
 
     match config::vault_path() {
         Ok(p) if vault::exists(&p) => match vault::check_permissions(&p) {
-            Ok(()) => println!("[ok]   vault at {} has safe permissions", p.display()),
+            Ok(()) => outln!("[ok]   vault at {} has safe permissions", p.display()),
             Err(e) => {
-                println!("[fail] vault permissions: {e}");
+                outln!("[fail] vault permissions: {e}");
                 ok = false;
             }
         },
-        Ok(p) => println!(
+        Ok(p) => outln!(
             "[warn] no vault yet at {} (run `tacitty init`)",
             p.display()
         ),
         Err(e) => {
-            println!("[fail] vault path: {e}");
+            outln!("[fail] vault path: {e}");
             ok = false;
         }
     }
@@ -582,44 +611,44 @@ fn cmd_doctor() -> Result<i32> {
     match config::agent_sock_path() {
         Ok(sock) => match agent::Client::connect(&sock) {
             Ok(mut c) => match c.status() {
-                Ok((unlocked, _)) => println!(
+                Ok((unlocked, _)) => outln!(
                     "[ok]   agent reachable at {} ({})",
                     sock.display(),
                     if unlocked { "unlocked" } else { "locked" }
                 ),
-                Err(e) => println!("[warn] agent reachable but status failed: {e}"),
+                Err(e) => outln!("[warn] agent reachable but status failed: {e}"),
             },
-            Err(_) => println!("[info] agent not running yet (starts automatically on first use)"),
+            Err(_) => outln!("[info] agent not running yet (starts automatically on first use)"),
         },
         Err(e) => {
-            println!("[fail] runtime dir: {e}");
+            outln!("[fail] runtime dir: {e}");
             ok = false;
         }
     }
 
     match autostart::enabled_in() {
         Ok(files) if files.is_empty() => {
-            println!("[info] auto-start is off (run `tacitty enable` to wrap every new terminal)")
+            outln!("[info] auto-start is off (run `tacitty enable` to wrap every new terminal)")
         }
         Ok(files) => {
             for f in files {
-                println!("[ok]   auto-start enabled in {}", f.display());
+                outln!("[ok]   auto-start enabled in {}", f.display());
             }
         }
-        Err(e) => println!("[warn] could not check auto-start: {e:#}"),
+        Err(e) => outln!("[warn] could not check auto-start: {e:#}"),
     }
 
     if std::env::var_os("TACITTY_ACTIVE").is_some() {
-        println!("[warn] already inside a tacitty shell (nested `shell` would not re-wrap)");
+        outln!("[warn] already inside a tacitty shell (nested `shell` would not re-wrap)");
     } else {
-        println!("[ok]   not currently nested");
+        outln!("[ok]   not currently nested");
     }
 
     match cfg.backend {
-        tacitty::backend::BackendKind::Native => println!("[ok]   backend: native"),
+        tacitty::backend::BackendKind::Native => outln!("[ok]   backend: native"),
         tacitty::backend::BackendKind::Pass => {
             let found = which("pass");
-            println!(
+            outln!(
                 "[{}]   backend: pass ({})",
                 if found { "ok" } else { "warn" },
                 if found {
@@ -631,7 +660,7 @@ fn cmd_doctor() -> Result<i32> {
         }
         tacitty::backend::BackendKind::SecretService => {
             let found = which("secret-tool");
-            println!(
+            outln!(
                 "[{}]   backend: secret-service ({})",
                 if found { "ok" } else { "warn" },
                 if found {
@@ -642,13 +671,13 @@ fn cmd_doctor() -> Result<i32> {
             );
         }
         tacitty::backend::BackendKind::Command => {
-            println!("[ok]   backend: command (`{}`)", cfg.command.get)
+            outln!("[ok]   backend: command (`{}`)", cfg.command.get)
         }
     }
 
     for pinentry in ["pinentry-curses", "pinentry-gnome3", "pinentry-qt"] {
         if which(pinentry) {
-            println!(
+            outln!(
                 "[info] {pinentry} is on PATH — its prompts run in raw mode and are NOT \
                  detected; switch gpg-agent's pinentry-program to pinentry-tty if you want \
                  alias expansion at gpg prompts"
@@ -656,8 +685,8 @@ fn cmd_doctor() -> Result<i32> {
         }
     }
 
-    println!();
-    println!(
+    outln!();
+    outln!(
         "{}",
         if ok {
             "All checks passed."
@@ -675,6 +704,6 @@ fn which(bin: &str) -> bool {
 }
 
 fn cmd_config_path() -> Result<i32> {
-    println!("{}", config::config_path()?.display());
+    outln!("{}", config::config_path()?.display());
     Ok(0)
 }

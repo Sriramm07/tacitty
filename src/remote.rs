@@ -15,35 +15,35 @@ pub struct LineTracker {
 }
 
 struct LinePerform {
-    /// Characters, not bytes: trimming a `String` by byte count can split a
-    /// multi-byte character and panic.
+    /// The last `max_chars` characters (characters, not bytes: trimming a
+    /// `String` by byte count can split a multi-byte character and panic).
+    /// Kept as a ring buffer so each printed character is O(1); the text is
+    /// only assembled when someone asks for it.
     chars: VecDeque<char>,
-    line: String,
     max_chars: usize,
 }
 
 impl LinePerform {
     fn clear(&mut self) {
         self.chars.clear();
-        self.line.clear();
     }
 }
 
+// Any control, escape or CSI sequence that moves the cursor, erases or
+// scrolls means the line on screen is no longer simply "what was printed
+// since the last newline". Each of these forgets the tracked line rather
+// than guess: a missed remote prompt is safe, a false one is not.
 impl Perform for LinePerform {
     fn print(&mut self, c: char) {
-        self.chars.push_back(c);
-        if self.chars.len() > self.max_chars {
+        if self.chars.len() == self.max_chars {
             self.chars.pop_front();
-            self.line = self.chars.iter().collect();
-        } else {
-            self.line.push(c);
         }
+        self.chars.push_back(c);
     }
 
     fn execute(&mut self, byte: u8) {
-        // Newline, carriage return or backspace: the tracked text no longer
-        // matches what's on screen at the cursor, so start over.
-        if matches!(byte, b'\n' | b'\r' | 0x08) {
+        // LF, VT, FF, CR, backspace.
+        if matches!(byte, b'\n' | 0x0b | 0x0c | b'\r' | 0x08) {
             self.clear();
         }
     }
@@ -55,10 +55,6 @@ impl Perform for LinePerform {
         _ignore: bool,
         action: char,
     ) {
-        // Anything that moves the cursor or erases text means the line on
-        // screen is no longer simply "what was printed since the last
-        // newline". Forget it rather than guess: a missed remote prompt is
-        // safe, a false one is not.
         if matches!(
             action,
             'A' | 'B'
@@ -70,13 +66,28 @@ impl Perform for LinePerform {
                 | 'H'
                 | 'J'
                 | 'K'
+                | 'L'
+                | 'M'
                 | 'P'
+                | 'S'
+                | 'T'
                 | 'X'
                 | '@'
+                | '`'
+                | 'a'
                 | 'd'
+                | 'e'
                 | 'f'
                 | 'u'
         ) {
+            self.clear();
+        }
+    }
+
+    fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        // ESC 8 (restore cursor), ESC D / E / M (index, next line, reverse
+        // index), ESC c (full reset).
+        if intermediates.is_empty() && matches!(byte, b'8' | b'D' | b'E' | b'M' | b'c') {
             self.clear();
         }
     }
@@ -87,8 +98,7 @@ impl LineTracker {
         LineTracker {
             parser: Parser::new(),
             perform: LinePerform {
-                chars: VecDeque::new(),
-                line: String::new(),
+                chars: VecDeque::with_capacity(512),
                 max_chars: 512,
             },
         }
@@ -98,9 +108,10 @@ impl LineTracker {
         self.parser.advance(&mut self.perform, bytes);
     }
 
-    /// The plain text of the output since the last newline.
-    pub fn current_line(&self) -> &str {
-        &self.perform.line
+    /// The plain text of the output since the last newline (at most the
+    /// last 512 characters).
+    pub fn current_line(&self) -> String {
+        self.perform.chars.iter().collect()
     }
 }
 
@@ -223,6 +234,46 @@ mod tests {
         assert_eq!(lt.current_line(), "");
         lt.feed(b"Password: \x08");
         assert_eq!(lt.current_line(), "");
+        for seq in [
+            &b"\x1b8"[..],
+            b"\x1bM",
+            b"\x1bD",
+            b"\x1bE",
+            b"\x1bc",
+            b"\x1b[2L",
+            b"\x1b[M",
+            b"\x1b[S",
+            b"\x1b[T",
+            b"\x1b[5`",
+            b"\x1b[3a",
+            b"\x1b[e",
+            b"\x0b",
+            b"\x0c",
+        ] {
+            lt.feed(b"Password: ");
+            lt.feed(seq);
+            assert_eq!(lt.current_line(), "", "{seq:?}");
+        }
+        // Colours and other attributes don't move the cursor.
+        lt.feed(b"\x1b[1mPassword:\x1b[0m ");
+        assert_eq!(lt.current_line(), "Password: ");
+    }
+
+    #[test]
+    fn very_long_lines_stay_fast() {
+        let mut lt = LineTracker::new();
+        let chunk = vec![b'x'; 1 << 20];
+        let start = std::time::Instant::now();
+        for _ in 0..10 {
+            lt.feed(&chunk);
+        }
+        assert_eq!(lt.current_line().len(), 512);
+        // 10 MiB without a newline; the previous version took seconds.
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            start.elapsed()
+        );
     }
 
     #[test]

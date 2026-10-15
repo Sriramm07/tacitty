@@ -46,6 +46,17 @@ pub struct HardenReport {
 /// it, so children (the user's shell) can be given it back.
 static ORIGINAL_CORE_LIMIT: std::sync::OnceLock<libc::rlimit> = std::sync::OnceLock::new();
 
+/// Put back the core-dump limit [`harden_process`] lowered, for code that
+/// is about to `exec` the user's own shell (best effort).
+pub fn restore_core_limit() {
+    if let Some(lim) = ORIGINAL_CORE_LIMIT.get() {
+        // SAFETY: `lim` is a valid, initialised rlimit that outlives the call.
+        unsafe {
+            libc::setrlimit(libc::RLIMIT_CORE, lim);
+        }
+    }
+}
+
 /// Disable core dumps and ptrace-attachability (`PR_SET_DUMPABLE=0`, soft
 /// `RLIMIT_CORE=0`). Best effort; the report says what succeeded. Only the
 /// soft limit is lowered, so [`spawn_on_pty`] can restore the original
@@ -451,16 +462,6 @@ pub fn ignore_sigpipe() {
     // SAFETY: SIG_IGN is a valid disposition for SIGPIPE.
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
-    }
-}
-
-/// Restore the default SIGPIPE action (quietly terminate, no core dump),
-/// so `tacitty ls | head -1` simply stops when `head` exits instead of
-/// failing on a broken pipe.
-pub fn default_sigpipe() {
-    // SAFETY: SIG_DFL is a valid disposition for SIGPIPE.
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 }
 

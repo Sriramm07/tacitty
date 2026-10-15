@@ -7,6 +7,7 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use regex::Regex;
 use secrecy::SecretString;
 
 use crate::config::Config;
@@ -155,6 +156,7 @@ fn classify_line(
     suppressed: bool,
     just_settled: bool,
     cfg: &Config,
+    prompt_re: &Regex,
     line_tracker: &LineTracker,
 ) -> LineMode {
     if alt_active {
@@ -195,8 +197,7 @@ fn classify_line(
     if !remote::is_allowlisted(&comm, &cfg.remote.processes) {
         return LineMode::None;
     }
-    let re = cfg.prompt_regex();
-    if !remote::looks_like_prompt(&re, line_tracker.current_line()) {
+    if !remote::looks_like_prompt(prompt_re, &line_tracker.current_line()) {
         return LineMode::None;
     }
     match cfg.remote.mode {
@@ -216,6 +217,7 @@ fn capture_still_valid(
     ctx: &CaptureCtx,
     output_seq: u64,
     cfg: &Config,
+    prompt_re: &Regex,
     alt: &AltScreenTracker,
     line_tracker: &LineTracker,
 ) -> bool {
@@ -233,7 +235,15 @@ fn capture_still_valid(
     if sys::tcgetpgrp(master_fd).ok() != ctx.pgid {
         return false;
     }
-    let now = classify_line(master_fd, alt.is_active(), false, false, cfg, line_tracker);
+    let now = classify_line(
+        master_fd,
+        alt.is_active(),
+        false,
+        false,
+        cfg,
+        prompt_re,
+        line_tracker,
+    );
     match ctx.mode {
         LineMode::Local => now == LineMode::Local,
         LineMode::RemoteAuto | LineMode::RemoteConfirm => now.is_remote(),
@@ -299,6 +309,8 @@ pub fn run(cfg: Config, options: RunOptions) -> anyhow::Result<i32> {
     let mut last_output_at = Instant::now() - Duration::from_secs(1);
     let mut output_seq: u64 = 0;
     let mut capture: Option<CaptureCtx> = None;
+    // Compiled once per session (it's validated when the config loads).
+    let prompt_re = cfg.prompt_regex();
 
     let exit_code: i32;
 
@@ -423,6 +435,7 @@ pub fn run(cfg: Config, options: RunOptions) -> anyhow::Result<i32> {
                             b,
                             master_fd,
                             &cfg,
+                            &prompt_re,
                             &mut sm,
                             &mut resolver,
                             &alt,
@@ -454,6 +467,7 @@ fn handle_input_byte(
     b: u8,
     master_fd: RawFd,
     cfg: &Config,
+    prompt_re: &Regex,
     sm: &mut StateMachine,
     resolver: &mut Resolver,
     alt: &AltScreenTracker,
@@ -465,17 +479,25 @@ fn handle_input_byte(
     output_seq: u64,
     capture: &mut Option<CaptureCtx>,
 ) {
-    let mode = *cached_mode.get_or_insert_with(|| {
-        let just_settled = last_output_at.elapsed() < Duration::from_millis(150);
-        classify_line(
-            master_fd,
-            alt.is_active(),
-            *suppressed,
-            just_settled,
-            cfg,
-            line_tracker,
-        )
-    });
+    // Whether this line is a password prompt only matters when the trigger
+    // is typed at the very start of a line (the only place a capture can
+    // begin), so the check runs only then, not on every keystroke.
+    let mode = if b == cfg.trigger_byte() && sm.at_line_start() {
+        *cached_mode.get_or_insert_with(|| {
+            let just_settled = last_output_at.elapsed() < Duration::from_millis(150);
+            classify_line(
+                master_fd,
+                alt.is_active(),
+                *suppressed,
+                just_settled,
+                cfg,
+                prompt_re,
+                line_tracker,
+            )
+        })
+    } else {
+        LineMode::None
+    };
     let secret_mode = mode.is_secret();
 
     let was_capturing = sm.is_capturing();
@@ -506,7 +528,10 @@ fn handle_input_byte(
             // program reading it (or the prompt), so the next keystroke
             // must be classified afresh, not trusted from before.
             if matches!(byte, b'\r' | b'\n' | 0x03 | 0x04 | 0x1a) {
-                if secret_mode {
+                // A password typed by hand: the terminal can stay in
+                // password mode for a moment after Enter, so don't treat
+                // the next line as a prompt until the program responds.
+                if detect::read_secret_mode(master_fd) {
                     *suppressed = true;
                 }
                 *cached_mode = None;
@@ -520,18 +545,26 @@ fn handle_input_byte(
             *cached_mode = None;
         }
         Action::ResolveAlias { alias, enter_byte } => {
-            if secret_mode {
-                *suppressed = true;
-            }
+            // A capture only ever starts on a password-prompt line.
+            *suppressed = true;
             *cached_mode = None;
             let Some(ctx) = capture.take() else {
                 ring_local_bell();
                 return;
             };
-            let still_valid =
-                || capture_still_valid(master_fd, &ctx, output_seq, cfg, alt, line_tracker);
+            let still_valid = || {
+                capture_still_valid(
+                    master_fd,
+                    &ctx,
+                    output_seq,
+                    cfg,
+                    prompt_re,
+                    alt,
+                    line_tracker,
+                )
+            };
 
-            if mode == LineMode::RemoteConfirm && !confirm_locally(&alias) {
+            if ctx.mode == LineMode::RemoteConfirm && !confirm_locally(&alias) {
                 ring_local_bell();
                 return;
             }
@@ -619,6 +652,9 @@ fn shell_command(options: &RunOptions) -> Command {
 
 fn exec_replace(mut cmd: Command) -> io::Error {
     use std::os::unix::process::CommandExt;
+    // This replaces tacitty with the user's shell, which should get its
+    // normal core-dump limit back.
+    sys::restore_core_limit();
     cmd.exec()
 }
 
@@ -641,7 +677,7 @@ mod tests {
         let lt = LineTracker::new();
         // master_fd -1 would error on tcgetattr, which is fine: alt_active
         // short-circuits before it's used.
-        let mode = classify_line(-1, true, false, false, &cfg, &lt);
+        let mode = classify_line(-1, true, false, false, &cfg, &cfg.prompt_regex(), &lt);
         assert!(matches!(mode, LineMode::None));
     }
 
@@ -650,7 +686,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.remote.mode = RemoteMode::Off;
         let lt = LineTracker::new();
-        let mode = classify_line(-1, false, false, false, &cfg, &lt);
+        let mode = classify_line(-1, false, false, false, &cfg, &cfg.prompt_regex(), &lt);
         assert!(matches!(mode, LineMode::None));
     }
 }

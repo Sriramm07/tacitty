@@ -39,20 +39,46 @@ pub enum BackendError {
 const HELPER_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Run `cmd` with stdin closed, capturing stdout into a self-wiping buffer
-/// (stderr is discarded). Kills it after [`HELPER_TIMEOUT`].
+/// (stderr is discarded). The whole call never takes much longer than
+/// [`HELPER_TIMEOUT`].
+///
+/// The helper runs in a new session (so also its own process group) with
+/// no controlling terminal: it can't read the user's terminal, which the
+/// wrapper has in raw mode, so a helper that wants to prompt fails at once
+/// instead of hanging. On timeout the whole group is killed, including
+/// background processes it started that would otherwise keep its output
+/// open.
 fn run_helper(cmd: &mut Command, name: &str) -> Result<(ExitStatus, SecretBuf), BackendError> {
+    use std::os::unix::process::CommandExt;
+    use std::sync::mpsc;
+
     let spawn_err = |e| BackendError::Spawn {
         cmd: name.to_string(),
         source: e,
     };
-    let mut child = cmd
-        .stdin(Stdio::null())
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(spawn_err)?;
+        .stderr(Stdio::null());
+    // SAFETY: only the async-signal-safe setsid() runs between fork and exec.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().map_err(spawn_err)?;
+    let pgid = child.id() as i32;
+    let kill_group = || {
+        let _ = crate::sys::kill(-pgid, libc::SIGKILL);
+    };
+
+    // Read stdout on a separate thread and hand the result over a channel,
+    // so waiting for it can be bounded by the deadline too.
     let mut stdout = child.stdout.take().expect("piped stdout");
-    let reader = std::thread::spawn(move || {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
         let mut out = SecretBuf::with_capacity(256);
         let mut chunk = zeroize::Zeroizing::new([0u8; 4096]);
         loop {
@@ -63,27 +89,37 @@ fn run_helper(cmd: &mut Command, name: &str) -> Result<(ExitStatus, SecretBuf), 
                 Ok(_) => {}
             }
         }
-        out
+        let _ = tx.send(out);
     });
+
+    let timed_out = || {
+        BackendError::Other(format!(
+            "`{name}` did not finish within {}s",
+            HELPER_TIMEOUT.as_secs()
+        ))
+    };
     let deadline = Instant::now() + HELPER_TIMEOUT;
     let status = loop {
         match child.try_wait().map_err(spawn_err)? {
             Some(status) => break status,
             None if Instant::now() >= deadline => {
-                let _ = child.kill();
+                kill_group();
                 let _ = child.wait();
-                let _ = reader.join();
-                return Err(BackendError::Other(format!(
-                    "`{name}` did not finish within {}s",
-                    HELPER_TIMEOUT.as_secs()
-                )));
+                return Err(timed_out());
             }
             None => std::thread::sleep(Duration::from_millis(10)),
         }
     };
-    let out = reader
-        .join()
-        .map_err(|_| BackendError::Other(format!("reading output of `{name}`")))?;
+    // The helper has exited. Its output normally ends right away; if
+    // something it left running still holds the pipe open, stop that too.
+    let out = match rx.recv_timeout(Duration::from_millis(500)) {
+        Ok(out) => out,
+        Err(_) => {
+            kill_group();
+            rx.recv_timeout(Duration::from_secs(1))
+                .map_err(|_| timed_out())?
+        }
+    };
     Ok((status, out))
 }
 
@@ -347,5 +383,41 @@ pub fn get_via_config(
             cfg: cfg.command.clone(),
         }
         .get(alias),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn helper_output_is_captured() {
+        let (status, out) = run_helper(Command::new("printf").arg("abc\\n"), "printf").unwrap();
+        assert!(status.success());
+        assert_eq!(first_line(&out).as_slice(), b"abc");
+    }
+
+    #[test]
+    fn background_child_holding_stdout_does_not_block() {
+        let start = Instant::now();
+        let (status, out) = run_helper(
+            Command::new("sh").args(["-c", "echo abc; sleep 30 &"]),
+            "sh",
+        )
+        .unwrap();
+        assert!(status.success());
+        assert_eq!(first_line(&out).as_slice(), b"abc");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn helper_has_no_terminal_to_prompt_on() {
+        let (status, _) =
+            run_helper(Command::new("sh").args(["-c", "exec 3</dev/tty"]), "sh").unwrap();
+        assert!(!status.success(), "helper could open the terminal");
     }
 }

@@ -16,7 +16,7 @@ Set TypingSpeed 40ms
 
 # Switch to the demo user off-camera.
 Hide
-Type "su - alice" Enter
+Type "su - sriram" Enter
 Sleep 800ms
 Type "clear" Enter
 Sleep 400ms

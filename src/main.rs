@@ -572,6 +572,13 @@ fn cmd_rm(alias_name: &str) -> Result<i32> {
 fn cmd_mv(old: &str, new: &str) -> Result<i32> {
     alias::validate(new).map_err(|e| anyhow::anyhow!("{e}"))?;
     let (path, pass, mut data) = open_vault()?;
+    if old == new {
+        return Ok(0);
+    }
+    // Never replace another alias's secret by renaming onto it.
+    if data.entries.contains_key(new) {
+        bail!("@{new} already exists; remove it first (`tacitty rm {new}`) or pick another name");
+    }
     // The entry, group included, moves to its new name unchanged.
     let entry = data
         .entries

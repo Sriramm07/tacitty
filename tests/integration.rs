@@ -1058,3 +1058,14 @@ fn exported_groups_survive_import() {
     );
     assert!(!out.contains("prod"), "{out:?}");
 }
+
+/// Renaming onto an alias that already exists must not destroy its secret.
+#[test]
+fn mv_refuses_to_overwrite_an_existing_alias() {
+    let env = setup_with_alias("first", "secret-one");
+    add_alias(&env, "second", "secret-two", PASSPHRASE);
+    let out = fails_with_master(&env, &["mv", "first", "second"]);
+    assert!(out.contains("already exists"), "{out:?}");
+    assert_eq!(stored_secret(&env, "first"), "secret-one");
+    assert_eq!(stored_secret(&env, "second"), "secret-two");
+}

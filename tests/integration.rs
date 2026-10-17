@@ -281,6 +281,7 @@ fn spawn_login_bash(env: &Env) -> rexpect::session::PtySession {
     cmd.env("TACITTY_TEST_WORK_FACTOR", "8");
     cmd.env_remove("TACITTY_ACTIVE");
     cmd.env_remove("NO_TACITTY");
+    cmd.env("BASH_SILENCE_DEPRECATION_WARNING", "1");
     rexpect::session::spawn_command(cmd, Some(15_000)).expect("spawn bash")
 }
 

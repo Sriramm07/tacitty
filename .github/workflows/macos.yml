@@ -63,6 +63,7 @@ jobs:
           # One at a time, as in docs/GUIDE.md: each test starts its own agent.
           check integration-tests cargo test --locked --features test-hooks --test integration -- --test-threads=1
           check doctor ./target/debug/tacitty doctor
+          check agent-diagnostics python3 ci/macos-diag.py results
           cat results/summary.txt
           exit $status
 

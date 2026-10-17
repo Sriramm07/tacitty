@@ -41,6 +41,9 @@ impl Env {
         cmd.env("XDG_RUNTIME_DIR", &self.runtime);
         cmd.env("TACITTY_TEST_WORK_FACTOR", "8");
         cmd.env_remove("TACITTY_ACTIVE");
+        // macOS's bash prints a "default shell is now zsh" notice at
+        // startup, which would land in the middle of the tests' output.
+        cmd.env("BASH_SILENCE_DEPRECATION_WARNING", "1");
         // Keep everything inside the test's own HOME: never the
         // developer's real config, vault or shell rc files.
         for var in [

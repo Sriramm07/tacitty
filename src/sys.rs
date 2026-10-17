@@ -38,7 +38,10 @@ pub fn getpid() -> i32 {
 /// Result of [`harden_process`].
 #[derive(Debug, Clone, Copy)]
 pub struct HardenReport {
-    pub dumpable_off: bool,
+    /// Debuggers can no longer attach: `PR_SET_DUMPABLE=0` on Linux (which
+    /// also makes `/proc/<pid>/mem`, `environ` etc. unreadable), and
+    /// `PT_DENY_ATTACH` on macOS.
+    pub attach_blocked: bool,
     pub core_limit_zero: bool,
 }
 
@@ -57,14 +60,13 @@ pub fn restore_core_limit() {
     }
 }
 
-/// Disable core dumps and ptrace-attachability (`PR_SET_DUMPABLE=0`, soft
-/// `RLIMIT_CORE=0`). Best effort; the report says what succeeded. Only the
-/// soft limit is lowered, so [`spawn_on_pty`] can restore the original
-/// limit for the user's shell instead of disabling core dumps for every
-/// program they run. Safe to call more than once.
+/// Disable core dumps and debugger attachment (soft `RLIMIT_CORE=0`, plus
+/// [`block_debugger_attach`]). Best effort; the report says what
+/// succeeded. Only the soft limit is lowered, so [`spawn_on_pty`] can
+/// restore the original limit for the user's shell instead of disabling
+/// core dumps for every program they run. Safe to call more than once.
 pub fn harden_process() -> HardenReport {
-    // SAFETY: prctl with PR_SET_DUMPABLE takes plain integer arguments.
-    let dumpable_off = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } == 0;
+    let attach_blocked = block_debugger_attach();
     let mut cur = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,
@@ -82,9 +84,43 @@ pub fn harden_process() -> HardenReport {
         false
     };
     HardenReport {
-        dumpable_off,
+        attach_blocked,
         core_limit_zero,
     }
+}
+
+/// `PR_SET_DUMPABLE=0`: no ptrace attach, no `/proc/<pid>/mem`, no core
+/// dump. The kernel resets it on `exec`, so the user's shell is unaffected.
+#[cfg(target_os = "linux")]
+fn block_debugger_attach() -> bool {
+    // SAFETY: prctl with PR_SET_DUMPABLE takes plain integer arguments.
+    unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) == 0 }
+}
+
+/// macOS has no "dumpable" flag; `PT_DENY_ATTACH` is the closest thing.
+/// From then on `ptrace(PT_ATTACH / PT_ATTACHEXC)` against this process
+/// fails, so lldb can't attach (and the attaching process gets SIGSEGV).
+/// How it behaves, per XNU (`bsd/kern/mach_process.c`, `kern_fork.c`,
+/// `kern_exec.c`):
+/// - It is NOT inherited by `fork`: a new process starts with its flags
+///   cleared. The user's shell, and everything else tacitty starts, stays
+///   debuggable as normal.
+/// - It IS kept across `exec`, unlike Linux's dumpable flag. That's why a
+///   nested `tacitty shell`, which only execs the plain shell, skips
+///   hardening altogether (see `main`).
+/// - If the process is already being traced, the kernel ends it on the
+///   spot (exit status `ENOTSUP`): tacitty can't be run under a debugger.
+///   That's the intent; every command may hold the vault or the master
+///   passphrase.
+///
+/// It does not stop root, or Apple-entitled tools that go through the
+/// Mach task port, from reading memory. As on Linux, it makes attaching
+/// harder, not impossible.
+#[cfg(target_os = "macos")]
+fn block_debugger_attach() -> bool {
+    // SAFETY: PT_DENY_ATTACH acts on the calling process and ignores the
+    // pid, address and data arguments.
+    unsafe { libc::ptrace(libc::PT_DENY_ATTACH, 0, std::ptr::null_mut(), 0) == 0 }
 }
 
 /// Best-effort `mlock` of a memory range. Returns whether it succeeded
@@ -125,6 +161,7 @@ pub fn umask(mask: u32) -> u32 {
 /// Uses the raw syscall rather than libc's `getrandom()` wrapper: in the
 /// static musl release builds that wrapper resolved to a null pointer and
 /// crashed, and older glibc versions don't have it at all.
+#[cfg(target_os = "linux")]
 pub fn getrandom(buf: &mut [u8]) -> io::Result<()> {
     let mut off = 0;
     while off < buf.len() {
@@ -145,6 +182,18 @@ pub fn getrandom(buf: &mut [u8]) -> io::Result<()> {
             return Err(e);
         }
         off += n as usize;
+    }
+    Ok(())
+}
+
+/// Fill `buf` from the kernel CSPRNG, via `getentropy(2)` (macOS has no
+/// `getrandom` syscall). Each call fills at most 256 bytes.
+#[cfg(target_os = "macos")]
+pub fn getrandom(buf: &mut [u8]) -> io::Result<()> {
+    for chunk in buf.chunks_mut(256) {
+        // SAFETY: the pointer/length pair describes `chunk`, which is at
+        // most the 256 bytes getentropy accepts.
+        cvt(unsafe { libc::getentropy(chunk.as_mut_ptr() as *mut libc::c_void, chunk.len()) })?;
     }
     Ok(())
 }
@@ -171,6 +220,7 @@ pub fn try_flock_exclusive(fd: RawFd) -> io::Result<bool> {
 }
 
 /// UID of the peer of a connected Unix socket (`SO_PEERCRED`).
+#[cfg(target_os = "linux")]
 pub fn peer_uid(fd: RawFd) -> io::Result<u32> {
     let mut cred = MaybeUninit::<libc::ucred>::uninit();
     let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
@@ -187,6 +237,79 @@ pub fn peer_uid(fd: RawFd) -> io::Result<u32> {
     cvt(r)?;
     // SAFETY: initialised by the successful getsockopt above.
     Ok(unsafe { cred.assume_init() }.uid)
+}
+
+/// Effective UID of the peer of a connected Unix socket (`getpeereid`,
+/// which on macOS reports the credentials the peer had when it connected,
+/// like `SO_PEERCRED`).
+#[cfg(target_os = "macos")]
+pub fn peer_uid(fd: RawFd) -> io::Result<u32> {
+    let (mut uid, mut gid) = (0, 0);
+    // SAFETY: `uid` and `gid` are valid out-pointers for the call.
+    cvt(unsafe { libc::getpeereid(fd, &mut uid, &mut gid) })?;
+    Ok(uid)
+}
+
+/// Short name of process `pid` (`p_comm`, at most 16 bytes): the macOS
+/// counterpart of Linux's `/proc/<pid>/comm`, looked up the way tmux does.
+#[cfg(target_os = "macos")]
+pub fn proc_comm(pid: i32) -> Option<String> {
+    if pid <= 0 {
+        return None;
+    }
+    let mut info = MaybeUninit::<libc::proc_bsdshortinfo>::zeroed();
+    let size = std::mem::size_of::<libc::proc_bsdshortinfo>() as c_int;
+    // SAFETY: `info` is a writable buffer of exactly `size` bytes.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDT_SHORTBSDINFO,
+            0,
+            info.as_mut_ptr() as *mut libc::c_void,
+            size,
+        )
+    };
+    if n != size {
+        return None;
+    }
+    // SAFETY: zero-initialised, and filled in completely (n == size).
+    let info = unsafe { info.assume_init() };
+    let name: Vec<u8> = info
+        .pbsi_comm
+        .iter()
+        .take_while(|&&c| c != 0)
+        .map(|&c| c as u8)
+        .collect();
+    (!name.is_empty()).then(|| String::from_utf8_lossy(&name).into_owned())
+}
+
+/// The private per-user temporary directory macOS creates for this user
+/// (`confstr(_CS_DARWIN_USER_TEMP_DIR)`, where `$TMPDIR` normally points:
+/// `/var/folders/../T/`, mode 0700). Asked from the system rather than read
+/// from `$TMPDIR`, which may have been pointed at the shared `/tmp`.
+#[cfg(target_os = "macos")]
+pub fn darwin_user_temp_dir() -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    // SAFETY: a null buffer of length 0 only asks for the size needed.
+    let len = unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, std::ptr::null_mut(), 0) };
+    if len == 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; len];
+    // SAFETY: `buf` has room for `len` bytes, including the trailing NUL.
+    let n = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_TEMP_DIR,
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+        )
+    };
+    if n == 0 || n > buf.len() {
+        return None;
+    }
+    buf.truncate(n - 1); // drop the NUL
+    let dir = std::path::PathBuf::from(std::ffi::OsString::from_vec(buf));
+    dir.is_absolute().then_some(dir)
 }
 
 // ---------------------------------------------------------------------------
@@ -272,12 +395,36 @@ pub fn set_cloexec(fd: RawFd) -> io::Result<()> {
 }
 
 /// Create a close-on-exec, non-blocking pipe: `(read_end, write_end)`.
+#[cfg(target_os = "linux")]
 pub fn pipe_nonblock() -> io::Result<(OwnedFd, OwnedFd)> {
     let mut fds = [0 as c_int; 2];
     // SAFETY: fds has room for the two descriptors pipe2 writes.
     cvt(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) })?;
     // SAFETY: pipe2 just returned two fresh descriptors that we now own.
     Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+}
+
+/// Create a close-on-exec, non-blocking pipe: `(read_end, write_end)`.
+///
+/// macOS has no `pipe2`, so the flags are set right after creation. A
+/// child forked by another thread in between could inherit the two fds;
+/// the wrapper creates this pipe before it starts any thread or child.
+#[cfg(target_os = "macos")]
+pub fn pipe_nonblock() -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [0 as c_int; 2];
+    // SAFETY: fds has room for the two descriptors pipe writes.
+    cvt(unsafe { libc::pipe(fds.as_mut_ptr()) })?;
+    // SAFETY: pipe just returned two fresh descriptors that we now own.
+    let (r, w) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    for fd in [r.as_raw_fd(), w.as_raw_fd()] {
+        set_cloexec(fd)?;
+        // SAFETY: fcntl F_GETFL/F_SETFL take plain integers.
+        unsafe {
+            let flags = cvt(libc::fcntl(fd, libc::F_GETFL))?;
+            cvt(libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK))?;
+        }
+    }
+    Ok((r, w))
 }
 
 // ---------------------------------------------------------------------------
@@ -322,6 +469,22 @@ pub fn tcgetpgrp(fd: RawFd) -> io::Result<i32> {
     cvt(unsafe { libc::tcgetpgrp(fd) })
 }
 
+/// `TIOCSCTTY` with the type `ioctl` takes (the libc crate declares it as
+/// `c_uint` on Apple targets but takes a `c_ulong` request there).
+#[cfg(target_os = "linux")]
+const TIOCSCTTY: libc::Ioctl = libc::TIOCSCTTY;
+#[cfg(target_os = "macos")]
+const TIOCSCTTY: libc::c_ulong = libc::TIOCSCTTY as libc::c_ulong;
+
+/// A pty pair.
+///
+/// Secret-prompt detection reads the *slave's* termios through the master
+/// (`tcgetattr(master)`). That works on both kernels: on Linux the master's
+/// TCGETS reports the slave side's settings, and on macOS master and slave
+/// share one `struct tty`, whose termios the master returns once the slave
+/// has been opened (`ptyioctl` in XNU's `bsd/kern/tty_dev.c`; `openpty`
+/// opens it). Ghostty and iTerm2 detect password input on macOS the same
+/// way. `tcgetpgrp(master)` likewise reports the slave's foreground group.
 pub struct Pty {
     pub master: OwnedFd,
     pub slave: OwnedFd,
@@ -366,7 +529,7 @@ pub fn spawn_on_pty(cmd: &mut Command, slave: OwnedFd) -> io::Result<Child> {
             if libc::setsid() == -1 {
                 return Err(io::Error::last_os_error());
             }
-            if libc::ioctl(0, libc::TIOCSCTTY, 0) == -1 {
+            if libc::ioctl(0, TIOCSCTTY, 0) == -1 {
                 return Err(io::Error::last_os_error());
             }
             // Give the user's shell back the core-dump limit it would have
@@ -401,6 +564,11 @@ pub fn spawn_detached(cmd: &mut Command) -> io::Result<Child> {
 
 static SIGNAL_PIPE_W: AtomicI32 = AtomicI32::new(-1);
 
+#[cfg(target_os = "linux")]
+use libc::__errno_location as errno_location;
+#[cfg(target_os = "macos")]
+use libc::__error as errno_location;
+
 /// Set by [`flag_handler`] when a termination signal arrives.
 pub static SIGNAL_FLAG: AtomicBool = AtomicBool::new(false);
 
@@ -408,7 +576,7 @@ extern "C" fn pipe_handler(sig: c_int) {
     // SAFETY (whole fn): async-signal-safe: only touches errno, an atomic and
     // write(2) with a one-byte stack buffer.
     unsafe {
-        let errno = libc::__errno_location();
+        let errno = errno_location();
         let saved = *errno;
         let fd = SIGNAL_PIPE_W.load(Ordering::Relaxed);
         if fd >= 0 {

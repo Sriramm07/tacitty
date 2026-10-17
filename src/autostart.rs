@@ -136,16 +136,24 @@ pub fn remove_block(content: &str) -> Option<String> {
     Some(format!("{head}{}", &content[end..]))
 }
 
+/// Is `exe` (a canonical path) installed by a package manager? That's
+/// anything under `/usr` or `/opt`: distro packages, and on macOS also
+/// Homebrew (`/opt/homebrew`, and `/usr/local/Cellar`, where its
+/// `/usr/local/bin` symlinks resolve to) and MacPorts (`/opt/local`).
+pub fn is_packaged_install(exe: &Path) -> bool {
+    exe.starts_with("/usr") || exe.starts_with("/opt")
+}
+
 /// Make sure a stable copy of the running binary exists for the hook to
-/// call, and return its path. Packaged installs (`/usr`, `/opt`) are used
-/// as-is; anything else (e.g. a binary run from ~/Downloads) is copied to
-/// `~/.local/bin/tacitty`, so the hook keeps working if the original is
-/// moved or deleted.
+/// call, and return its path. Packaged installs (see
+/// [`is_packaged_install`]) are used as-is; anything else (e.g. a binary
+/// run from ~/Downloads) is copied to `~/.local/bin/tacitty`, so the hook
+/// keeps working if the original is moved or deleted.
 pub fn install_binary() -> Result<PathBuf> {
     let exe = std::env::current_exe()
         .and_then(|p| p.canonicalize())
         .context("locating the running tacitty binary")?;
-    if exe.starts_with("/usr") || exe.starts_with("/opt") {
+    if is_packaged_install(&exe) {
         return Ok(exe);
     }
     let dir = home()?.join(".local/bin");
@@ -164,16 +172,61 @@ pub fn install_binary() -> Result<PathBuf> {
 }
 
 /// Rc files `enable` should hook: every supported shell whose rc file
-/// already exists, plus the login shell's (created if missing).
-fn target_shells() -> Result<Vec<Shell>> {
+/// already exists, plus the login shell's (created if missing). On macOS,
+/// also bash's login-shell file (see [`bash_login_file`]).
+fn target_files() -> Result<Vec<PathBuf>> {
     let login = login_shell();
     let mut out = Vec::new();
     for s in Shell::ALL {
-        if Some(s) == login || s.rc_path()?.exists() {
-            out.push(s);
+        let rc = s.rc_path()?;
+        if Some(s) == login || rc.exists() {
+            out.push(rc);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let file = bash_login_file()?;
+        // ~/.profile is read by other shells too: only hook it when it is
+        // what the user's own bash login shell reads.
+        let bash_only = !file.ends_with(".profile");
+        if login == Some(Shell::Bash) || (bash_only && file.exists()) {
+            out.push(file);
         }
     }
     Ok(out)
+}
+
+/// Every file `enable` may have hooked, for `disable` and `doctor`.
+fn hookable_files() -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    for s in Shell::ALL {
+        out.push(s.rc_path()?);
+    }
+    #[cfg(target_os = "macos")]
+    for name in BASH_LOGIN_FILES {
+        out.push(home()?.join(name));
+    }
+    Ok(out)
+}
+
+/// What a bash login shell reads, in order of preference.
+#[cfg(target_os = "macos")]
+const BASH_LOGIN_FILES: [&str; 3] = [".bash_profile", ".bash_login", ".profile"];
+
+/// The file a bash *login* shell runs: the first of [`BASH_LOGIN_FILES`]
+/// that exists (bash reads only that one), or ~/.bash_profile if none
+/// does. macOS terminals start login shells, so there this, not
+/// ~/.bashrc, is what a new bash terminal runs. Picking the file bash
+/// already reads matters: creating ~/.bash_profile next to an existing
+/// ~/.profile would stop bash from reading ~/.profile at all.
+#[cfg(target_os = "macos")]
+fn bash_login_file() -> Result<PathBuf> {
+    let home = home()?;
+    Ok(BASH_LOGIN_FILES
+        .iter()
+        .map(|name| home.join(name))
+        .find(|p| p.exists())
+        .unwrap_or_else(|| home.join(".bash_profile")))
 }
 
 /// Replace `path` with `content` atomically: write a temporary file next
@@ -246,8 +299,8 @@ fn read_rc(path: &Path) -> Result<String> {
 
 /// Install (or refresh) the hook. Returns the rc files that were written.
 pub fn enable() -> Result<Vec<PathBuf>> {
-    let shells = target_shells()?;
-    if shells.is_empty() {
+    let files = target_files()?;
+    if files.is_empty() {
         bail!(
             "auto-start supports bash and zsh, but $SHELL is {} and no ~/.bashrc or ~/.zshrc exists; \
              run `tacitty shell` manually or set your terminal's command to `tacitty shell`",
@@ -257,8 +310,7 @@ pub fn enable() -> Result<Vec<PathBuf>> {
     let bin = install_binary()?;
     let block = render_block(&bin);
     let mut written = Vec::new();
-    for s in shells {
-        let path = s.rc_path()?;
+    for path in files {
         let before = read_rc(&path)?;
         let after = upsert_block(&before, &block);
         if after != before {
@@ -272,8 +324,7 @@ pub fn enable() -> Result<Vec<PathBuf>> {
 /// Remove the hook from every rc file that has it. Returns those files.
 pub fn disable() -> Result<Vec<PathBuf>> {
     let mut removed = Vec::new();
-    for s in Shell::ALL {
-        let path = s.rc_path()?;
+    for path in hookable_files()? {
         if let Some(after) = remove_block(&read_rc(&path)?) {
             write_rc(&path, &after)?;
             removed.push(path);
@@ -285,8 +336,7 @@ pub fn disable() -> Result<Vec<PathBuf>> {
 /// Rc files that currently contain the hook.
 pub fn enabled_in() -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
-    for s in Shell::ALL {
-        let path = s.rc_path()?;
+    for path in hookable_files()? {
         if has_block(&read_rc(&path)?) {
             out.push(path);
         }
@@ -342,6 +392,26 @@ mod tests {
     fn empty_rc_gets_just_the_block() {
         assert_eq!(upsert_block("", &block()), block());
         assert_eq!(remove_block(&block()).unwrap(), "");
+    }
+
+    #[test]
+    fn packaged_installs_are_used_in_place() {
+        for p in [
+            "/usr/bin/tacitty",
+            "/opt/tacitty/bin/tacitty",
+            "/opt/homebrew/Cellar/tacitty/0.1.0/bin/tacitty",
+            "/usr/local/Cellar/tacitty/0.1.0/bin/tacitty",
+            "/opt/local/bin/tacitty",
+        ] {
+            assert!(is_packaged_install(Path::new(p)), "{p}");
+        }
+        for p in [
+            "/home/u/.local/bin/tacitty",
+            "/Users/u/.local/bin/tacitty",
+            "/Users/u/Downloads/tacitty",
+        ] {
+            assert!(!is_packaged_install(Path::new(p)), "{p}");
+        }
     }
 
     #[test]

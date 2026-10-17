@@ -202,14 +202,26 @@ pub fn vault_path() -> Result<PathBuf> {
 /// Without `XDG_RUNTIME_DIR` it falls back to a directory under the user's
 /// own state dir rather than a predictable name in the world-writable
 /// `/tmp`, which another user could create first to block the agent.
+///
+/// macOS has no `XDG_RUNTIME_DIR`; there the fallback is first the
+/// private per-user temporary directory (`/var/folders/../T/tacitty`),
+/// which is local, mode 0700 and emptied at boot. macOS also deletes
+/// files there after a few days without use, which the agent handles
+/// (see `agent::run`).
 pub fn runtime_dir() -> Result<PathBuf> {
     match std::env::var_os("XDG_RUNTIME_DIR") {
         Some(v) if !v.is_empty() && Path::new(&v).is_absolute() => {
             Ok(PathBuf::from(v).join("tacitty"))
         }
-        _ => Ok(xdg("XDG_STATE_HOME", ".local/state")?
-            .join("tacitty")
-            .join("run")),
+        _ => {
+            #[cfg(target_os = "macos")]
+            if let Some(tmp) = sys::darwin_user_temp_dir() {
+                return Ok(tmp.join("tacitty"));
+            }
+            Ok(xdg("XDG_STATE_HOME", ".local/state")?
+                .join("tacitty")
+                .join("run"))
+        }
     }
 }
 
@@ -217,8 +229,29 @@ pub fn runtime_dir() -> Result<PathBuf> {
 /// to an older agent that is still running from before an update.
 const AGENT_PROTOCOL: u32 = 2;
 
+/// The longest path a Unix socket can have: `sizeof(sun_path)` minus its
+/// terminating NUL.
+#[cfg(target_os = "linux")]
+const MAX_SOCKET_PATH: usize = 107;
+#[cfg(target_os = "macos")]
+const MAX_SOCKET_PATH: usize = 103;
+
 pub fn agent_sock_path() -> Result<PathBuf> {
-    Ok(runtime_dir()?.join(format!("agent-{AGENT_PROTOCOL}.sock")))
+    let path = runtime_dir()?.join(format!("agent-{AGENT_PROTOCOL}.sock"));
+    check_socket_path(&path)?;
+    Ok(path)
+}
+
+fn check_socket_path(path: &Path) -> Result<()> {
+    let len = path.as_os_str().len();
+    if len > MAX_SOCKET_PATH {
+        bail!(
+            "the agent socket path {} is {len} bytes long, but a Unix socket path can be at \
+             most {MAX_SOCKET_PATH}; set XDG_RUNTIME_DIR to a shorter directory",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 pub fn agent_lock_path() -> Result<PathBuf> {
@@ -315,6 +348,15 @@ get = "bw get password {alias}"
             ..Config::default()
         };
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn socket_path_length_is_checked() {
+        let fits = format!("/{}", "a".repeat(MAX_SOCKET_PATH - 1));
+        assert!(check_socket_path(Path::new(&fits)).is_ok());
+        let too_long = format!("/{}", "a".repeat(MAX_SOCKET_PATH));
+        let err = check_socket_path(Path::new(&too_long)).unwrap_err();
+        assert!(err.to_string().contains("XDG_RUNTIME_DIR"), "{err}");
     }
 
     #[test]

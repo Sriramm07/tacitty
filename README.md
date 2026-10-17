@@ -6,7 +6,7 @@
 Type `@proddb` at any password prompt and the real secret is sent instead.
 
 [![Release](https://img.shields.io/github/v/release/Sriramm07/tacitty?color=8b5cf6)](https://github.com/Sriramm07/tacitty/releases/latest)
-[![Platform](https://img.shields.io/badge/platform-Linux-0ea5e9)](docs/GUIDE.md#install)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-0ea5e9)](docs/GUIDE.md#install)
 [![Rust](https://img.shields.io/badge/built%20with-Rust-f97316)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-64748b)](#license)
 
@@ -33,13 +33,13 @@ surfers. taciTTY lets you type a short, memorable alias instead. It works at
   global keyboard hooks, and nothing in your shell history or scrollback.
 - 🌐 **Works over SSH too.** Prompts from remote hosts inside `ssh`,
   `mosh`, `docker exec` or `kubectl exec` sessions are recognised as well.
-- ⚡ **Quick to set up.** One static binary. `tacitty init` turns it on for
-  every new terminal automatically.
+- ⚡ **Quick to set up.** One self-contained binary. `tacitty init` turns it
+  on for every new terminal automatically.
 
 ## 🚀 Quick start
 
 ```sh
-# 1. Install (x86_64 or ARM64 Linux, no root needed)
+# 1. Install (Linux or macOS, x86_64 or ARM64, no root needed)
 curl -fsSL https://raw.githubusercontent.com/Sriramm07/tacitty/main/install.sh | sh
 
 # 2. Create your vault and turn on auto-start
@@ -113,7 +113,7 @@ get = "bw get password {alias}"
 |---|---|---|
 | **`native`** (default) | `~/.local/share/tacitty/vault.age` | One [`age`](https://github.com/str4d/rage)-encrypted file (scrypt passphrase), mode `0600`. A per-user background agent keeps it unlocked until the idle timeout, so you enter the passphrase once per session. |
 | **`pass`** | [`pass`](https://www.passwordstore.org/) under `<prefix>/<alias>` | Read-only; manage entries with `pass` itself. |
-| **`secret-service`** | GNOME Keyring / KWallet via `secret-tool` | `tacitty add` can write here too. |
+| **`secret-service`** | GNOME Keyring / KWallet via `secret-tool` | Linux only. `tacitty add` can write here too. |
 | **`command`** | Any command you configure | `{alias}` is substituted, the first line of output is the secret. Run directly, never through a shell, so alias text can't inject commands. |
 
 Helper programs (`pass`, `secret-tool`, `command`) run without access to

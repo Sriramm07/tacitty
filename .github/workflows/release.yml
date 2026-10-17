@@ -1,9 +1,9 @@
 name: Release
 
 # Push a tag like `v0.1.0` to publish a GitHub Release with static musl
-# binaries (x86_64, aarch64) as .tar.gz + .sha256, plus a signed build
-# provenance attestation for each. install.sh and `tacitty update` both
-# download from these releases.
+# Linux binaries and macOS binaries (each x86_64 and aarch64) as .tar.gz +
+# .sha256, plus a signed build provenance attestation for each. install.sh
+# and `tacitty update` both download from these releases.
 #
 # Hardening:
 # - Builds run with read-only permissions and no shared build cache; only
@@ -75,9 +75,57 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # Both macOS targets build on one Apple Silicon runner (Xcode's SDK
+  # covers x86_64 too). Not codesigned or notarized: there's no Apple
+  # Developer account. `curl | sh` installs aren't quarantined, so that
+  # doesn't matter there; see docs/GUIDE.md for browser downloads.
+  build-macos:
+    name: build (${{ matrix.target }})
+    needs: check
+    runs-on: macos-15
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # Apple Silicon kills binaries whose (ad-hoc, linker-made) signature
+      # is broken, e.g. by stripping. Make sure this one actually runs.
+      - name: smoke test
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: |
+          codesign --verify --verbose "target/${{ matrix.target }}/release/tacitty"
+          "target/${{ matrix.target }}/release/tacitty" --version
+
+      - name: package tarball
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          name="tacitty-${GITHUB_REF_NAME}-${TARGET}"
+          mkdir -p "dist/$name"
+          cp "target/${TARGET}/release/tacitty" README.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+          rm -rf "dist/$name"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
   publish:
     name: publish release
-    needs: build
+    needs: [build, build-macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the release

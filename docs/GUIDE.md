@@ -24,11 +24,25 @@ curl -fsSL https://raw.githubusercontent.com/Sriramm07/tacitty/main/install.sh |
 |---|---|
 | Specific version | `TACITTY_VERSION=v0.1.0` before `sh` |
 | Different location | `TACITTY_INSTALL_DIR=/some/dir` before `sh` |
-| By hand | Download `tacitty-<version>-<arch>-unknown-linux-musl.tar.gz` from the release page, check it against its `.sha256`, and put `tacitty` on your `PATH` |
+| By hand | Download `tacitty-<version>-<target>.tar.gz` from the release page (`<target>`: `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `x86_64-apple-darwin` or `aarch64-apple-darwin`), check it against its `.sha256`, and put `tacitty` on your `PATH` |
 | From source | See [Building from source](#development) |
 
-taciTTY is a single static binary with no dependencies, so it runs on any
-Linux distribution.
+On Linux, taciTTY is a single static binary with no dependencies, so it
+runs on any distribution.
+
+**macOS** (Apple Silicon and Intel) uses the same installer and the same
+commands. A few things differ:
+
+- `~/.local/bin` isn't on your `PATH` by default on macOS. The installer
+  tells you how to add it (for zsh: `export PATH="$HOME/.local/bin:$PATH"`
+  in `~/.zshrc`). Auto-start works either way.
+- The binaries aren't signed with an Apple Developer ID or notarized.
+  That doesn't matter for `curl ... | sh` or `tacitty update`, which
+  don't mark the file as downloaded. A `.tar.gz` downloaded **with a
+  browser** is quarantined, and macOS refuses to run it; after checking
+  its checksum, clear the flag with
+  `xattr -d com.apple.quarantine tacitty`.
+- The `secret-service` backend is Linux only.
 
 **Updating:** run `tacitty update`, or `tacitty update --check` to only see
 whether a newer version exists. It verifies the checksum and makes sure the
@@ -106,9 +120,18 @@ new tabs and windows, after a reboot, and interactive SSH logins to this
 machine. It:
 
 - copies the binary to `~/.local/bin/tacitty` (skipped for installs under
-  `/usr` or `/opt`), so it keeps working if the downloaded file is moved;
+  `/usr` or `/opt`, which includes Homebrew and MacPorts), so it keeps
+  working if the downloaded file is moved;
 - adds a marked `# >>> tacitty autostart >>>` block to `~/.bashrc` and/or
   `~/.zshrc`.
+
+**On macOS**, zsh is the default shell and its `~/.zshrc` is hooked as
+above. macOS terminals start *login* shells, and a bash login shell reads
+`~/.bash_profile` instead of `~/.bashrc`, so for bash taciTTY also hooks
+`~/.bash_profile` (or `~/.bash_login` / `~/.profile`, if that's the file
+your bash reads). The shell inside taciTTY is started as a login shell
+too, as the terminal would have, so it picks up the same settings.
+`tacitty disable` removes the block from all of these files.
 
 Your login shell is **not** changed. Scripts, `scp`, cron jobs and
 `ssh host cmd` never go through taciTTY, because the hook only runs for
@@ -120,7 +143,7 @@ lock you out.
 |---|---|
 | Turn auto-start off / on | `tacitty disable` / `tacitty enable` |
 | Skip it for one shell | `NO_TACITTY=1 bash` |
-| Skip it for a whole login session | add `export NO_TACITTY=1` to `~/.profile` |
+| Skip it for a whole login session | add `export NO_TACITTY=1` to `~/.profile` (zsh on macOS: `~/.zprofile`) |
 | Create the vault without auto-start | `tacitty init --no-autostart` |
 
 > [!NOTE]
@@ -151,8 +174,10 @@ prevented); someone who can overwrite the vault or config files.
 - Secrets never touch command-line arguments, environment variables, the
   clipboard, disk (except the encrypted vault), logs, or the output stream.
 - Every taciTTY command turns off core dumps and debugger attachment at
-  startup (`PR_SET_DUMPABLE=0`, `RLIMIT_CORE=0`). Your own shell gets its
-  normal core-dump limit back.
+  startup (`RLIMIT_CORE=0`, plus `PR_SET_DUMPABLE=0` on Linux and
+  `PT_DENY_ATTACH` on macOS). Your own shell gets its normal core-dump
+  limit back and stays debuggable. On macOS this means taciTTY can't be
+  run under a debugger such as lldb: it exits at once.
 - Every buffer that holds a secret is wiped as soon as it's no longer
   needed (`zeroize`), locked into memory where possible (`mlock`), and never
   printed in debug output. That includes the messages between taciTTY and
@@ -215,8 +240,11 @@ prevented); someone who can overwrite the vault or config files.
   secret is written. A prompt that ends in the tiny gap between that check
   and the write (well under a millisecond) can't be detected; no program
   outside the kernel can close that gap completely.
-- Windows and macOS aren't supported. GUI apps and browser forms are out of
-  scope; taciTTY is not a full password manager.
+- **macOS support is new** and less tested than Linux. It's checked by a
+  manually run CI workflow on GitHub's macOS runners (Apple Silicon and
+  Intel), not yet by much day-to-day use. Please report anything odd.
+- Windows isn't supported. GUI apps and browser forms are out of scope;
+  taciTTY is not a full password manager.
 
 </details>
 
@@ -249,9 +277,14 @@ for the fuzz targets.
 - **Static binary:** `rustup target add x86_64-unknown-linux-musl`, then
   `cargo build --release --target x86_64-unknown-linux-musl`.
 - **Releases:** pushing a tag like `v0.1.0` (it must match `Cargo.toml`)
-  runs `.github/workflows/release.yml`, which publishes static binaries for
-  x86_64 and aarch64 with `.sha256` checksums. `install.sh` and
-  `tacitty update` install from these.
+  runs `.github/workflows/release.yml`, which publishes static Linux
+  binaries and macOS binaries, each for x86_64 and aarch64, with `.sha256`
+  checksums. `install.sh` and `tacitty update` install from these.
+- **macOS:** `.github/workflows/macos.yml` (run it by hand from the Actions
+  tab) builds and runs the whole test suite on Apple Silicon and Intel
+  Macs. Without a Mac, `rustup target add aarch64-apple-darwin` and
+  `cargo clippy --all-targets --features test-hooks --target
+  aarch64-apple-darwin` still type-checks the macOS code.
 - **Arch Linux:** `packaging/PKGBUILD`.
 - **Demo GIF:** recorded with [VHS](https://github.com/charmbracelet/vhs)
   from [`assets/demo/demo.tape`](../assets/demo/demo.tape), against a

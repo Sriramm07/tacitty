@@ -1,3 +1,8 @@
+// The pty, termios, process-hardening and peer-credential code in `sys` is
+// written for these two kernels only.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+compile_error!("tacitty supports Linux and macOS only");
+
 pub mod agent;
 pub mod alias;
 pub mod autostart;

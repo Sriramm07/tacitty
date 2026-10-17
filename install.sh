@@ -1,5 +1,5 @@
 #!/bin/sh
-# tacitty installer: downloads a prebuilt static binary from GitHub Releases,
+# tacitty installer: downloads a prebuilt binary (Linux or macOS) from GitHub Releases,
 # verifies its SHA-256 checksum, and installs it.
 #
 #   curl -fsSL https://raw.githubusercontent.com/Sriramm07/tacitty/main/install.sh | sh
@@ -9,6 +9,9 @@
 #   TACITTY_INSTALL_DIR   where to put the binary (default: ~/.local/bin)
 
 set -eu
+
+# Portability: plain POSIX sh, and only options that the GNU (Linux) and
+# BSD (macOS) versions of curl, sed, cut, tail, tr, mktemp and tar share.
 
 # Everything runs inside main(), called on the last line: if the download
 # of this script is cut off part-way, the shell has only read a function
@@ -53,12 +56,29 @@ main() {
         die "need sha256sum or shasum to verify the download"
     fi
 
-    [ "$(uname -s)" = "Linux" ] || die "tacitty only supports Linux (found $(uname -s))"
-
-    case "$(uname -m)" in
-        x86_64 | amd64) target="x86_64-unknown-linux-musl" ;;
-        aarch64 | arm64) target="aarch64-unknown-linux-musl" ;;
-        *) die "no prebuilt binary for $(uname -m); build from source instead (see README)" ;;
+    os="$(uname -s)"
+    arch="$(uname -m)"
+    case "$os" in
+        Linux)
+            case "$arch" in
+                x86_64 | amd64) target="x86_64-unknown-linux-musl" ;;
+                aarch64 | arm64) target="aarch64-unknown-linux-musl" ;;
+                *) die "no prebuilt binary for $arch; build from source instead (see README)" ;;
+            esac
+            ;;
+        Darwin)
+            # A shell running under Rosetta reports x86_64 on Apple
+            # Silicon; install the native build anyway.
+            if [ "$arch" = "x86_64" ] && [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" = "1" ]; then
+                arch="arm64"
+            fi
+            case "$arch" in
+                arm64 | aarch64) target="aarch64-apple-darwin" ;;
+                x86_64) target="x86_64-apple-darwin" ;;
+                *) die "no prebuilt binary for $arch; build from source instead (see README)" ;;
+            esac
+            ;;
+        *) die "tacitty supports Linux and macOS only (found $os)" ;;
     esac
 
     version="${TACITTY_VERSION:-}"
@@ -97,7 +117,15 @@ main() {
 
     case ":$PATH:" in
         *":$INSTALL_DIR:"*) ;;
-        *) say "note: $INSTALL_DIR is not on your PATH yet; open a new terminal or add it" ;;
+        *)
+            if [ "$os" = "Darwin" ]; then
+                # macOS never adds ~/.local/bin to PATH by itself.
+                say "note: $INSTALL_DIR is not on your PATH; add it in your shell's startup file,"
+                say "      e.g. echo 'export PATH=\"$INSTALL_DIR:\$PATH\"' >> ~/.zshrc"
+            else
+                say "note: $INSTALL_DIR is not on your PATH yet; open a new terminal or add it"
+            fi
+            ;;
     esac
 
     echo

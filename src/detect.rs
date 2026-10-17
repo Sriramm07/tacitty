@@ -13,6 +13,9 @@ pub fn is_secret_termios(t: &libc::termios) -> bool {
     echo_off && canon_ish
 }
 
+/// Is the program on the other side of the pty reading a password right
+/// now? `tcgetattr` on the master reports the slave's settings on both
+/// Linux and macOS (see [`sys::Pty`]).
 pub fn read_secret_mode(master_fd: RawFd) -> bool {
     match sys::tcgetattr(master_fd) {
         Ok(t) => is_secret_termios(&t),

@@ -153,10 +153,18 @@ impl RecentNames {
 }
 
 /// Read `/proc/<pid>/comm` (trimmed), if it exists.
+#[cfg(target_os = "linux")]
 pub fn proc_comm(pid: i32) -> Option<String> {
     std::fs::read_to_string(format!("/proc/{pid}/comm"))
         .ok()
         .map(|s| s.trim().to_string())
+}
+
+/// The process's short name (`p_comm`), macOS's equivalent of
+/// `/proc/<pid>/comm`.
+#[cfg(target_os = "macos")]
+pub fn proc_comm(pid: i32) -> Option<String> {
+    crate::sys::proc_comm(pid)
 }
 
 /// Is `comm` in the configured allowlist of remote-fallback-eligible

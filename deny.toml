@@ -10,7 +10,17 @@ targets = [
 
 [advisories]
 version = 2
-ignore = []
+ignore = [
+    # `rsa` (pulled in by age's "ssh" feature, used only by `tacitty
+    # export --to ssh-rsa ...` / `tacitty import -i id_rsa`) has no fixed
+    # release for the Marvin timing attack. Exploiting it needs an attacker
+    # who can make the victim run many RSA decryptions and time each one
+    # precisely, i.e. a network-facing decryption oracle. tacitty does at
+    # most one RSA decryption per `import`, run by hand, and encrypting to
+    # an RSA public key involves no private-key operation at all.
+    # Re-check when age moves to rsa 0.10.
+    { id = "RUSTSEC-2023-0071", reason = "one-shot local RSA decryption is not a timing oracle; see comment" },
+]
 
 [licenses]
 version = 2

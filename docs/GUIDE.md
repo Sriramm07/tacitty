@@ -5,6 +5,7 @@
 - [Install](#install)
 - [How it works](#how-it-works)
 - [Auto-start](#auto-start)
+- [Sharing aliases securely](#sharing)
 - [Security](#security)
 - [Development](#development)
 
@@ -129,6 +130,86 @@ lock you out.
 > **For tmux**, wrap each *pane* rather than the tmux client: see
 > [`contrib/tacitty.tmux.conf`](../contrib/tacitty.tmux.conf).
 
+<a id="sharing"></a>
+
+## 🤝 Sharing aliases securely
+
+`tacitty export` writes some or all of your aliases to an encrypted file,
+and `tacitty import` adds them to someone else's vault. No server or
+account is involved: you move the file however you like (`scp`, chat,
+email, a USB stick), and only someone with the right key or passphrase can
+open it.
+
+**To specific people (public keys).** Encrypt to your colleagues' SSH
+public keys (`ssh-ed25519`, or `ssh-rsa` of at least 2048 bits) or
+[age](https://age-encryption.org) keys (`age1...`). Only the matching
+private keys can open the file:
+
+```sh
+# Alice's key file can be her ~/.ssh/id_ed25519.pub, or https://github.com/alice.keys
+tacitty export proddb rootpw --to-file alice.pub -o prod.tacitty
+
+# Keys can also be given directly (quote SSH keys, they contain spaces)
+tacitty export proddb --to "ssh-ed25519 AAAAC3Nza... alice@laptop" --to age1qyqs... -o prod.tacitty
+```
+
+`--to` and `--to-file` can be repeated. A key file has one key per line;
+blank lines and `#` comments are skipped, and any other line that isn't a
+supported key stops the export with an error, so nobody is left out by
+accident.
+
+**With a passphrase.** Without `--to`/`--to-file`, taciTTY asks for an
+export passphrase (twice, at least 12 characters):
+
+```sh
+tacitty export -o team.tacitty --armor      # every alias, as pasteable text
+```
+
+`--armor` writes ASCII text (`-----BEGIN AGE ENCRYPTED FILE-----`) instead
+of binary, for pasting into a chat or email. Either way, export asks for
+your master passphrase first, writes the file with mode `0600`, and won't
+overwrite an existing file unless you pass `--force`. With no alias names,
+every alias is exported.
+
+**Importing.** Your colleague runs:
+
+```sh
+tacitty import prod.tacitty                 # uses ~/.ssh/id_ed25519 or ~/.ssh/id_rsa
+tacitty import prod.tacitty -i ~/.config/age/key.txt
+```
+
+taciTTY works out from the file whether it needs a passphrase or a private
+key. `-i` takes an age identity file or an SSH private key (it asks for the
+key's passphrase if it has one) and can be repeated. Then it asks for the
+importer's own master passphrase and adds the aliases to their vault.
+Aliases they already have are skipped and listed, unless they pass
+`--overwrite`. Entries that can't be used (an invalid alias name, a
+password with control characters) are skipped with a reason; secrets are
+never printed.
+
+**What's in the file.** A standard [age](https://age-encryption.org/v1)
+file whose content is a FIDO Alliance Credential Exchange Format (CXF)
+v1.0 JSON document, with each alias as an item titled with the alias name
+and holding its password. So the file can also be opened with
+the standard tools, for example `age -d -i ~/.ssh/id_ed25519 prod.tacitty`
+or `age -d team.tacitty` for a passphrase file. That prints the secrets in
+plain text, so only do it when you mean to.
+
+> [!IMPORTANT]
+> - **It's a one-time copy.** Imported aliases don't stay in sync: later
+>   changes on either side aren't shared.
+> - **Sharing can't be undone.** Anyone who received a secret can keep
+>   it. To revoke someone's access, change the real password (and send a
+>   fresh export to the people who should still have it).
+> - **Protect the passphrase.** For passphrase-protected files, the
+>   passphrase is all that stands between the file and an offline guessing
+>   attack. Use a long, random one and send it over a different channel
+>   than the file (for example, the file by email and the passphrase by
+>   phone).
+> - Delete export files once they have been imported.
+> - Secrets that aren't valid UTF-8 text can't be exported; export names
+>   the alias and writes nothing.
+
 <a id="security"></a>
 
 ## 🛡️ Security
@@ -149,7 +230,8 @@ prevented); someone who can overwrite the vault or config files.
 <br>
 
 - Secrets never touch command-line arguments, environment variables, the
-  clipboard, disk (except the encrypted vault), logs, or the output stream.
+  clipboard, disk (except the encrypted vault and encrypted export files
+  you create), logs, or the output stream.
 - Every taciTTY command turns off core dumps and debugger attachment at
   startup (`PR_SET_DUMPABLE=0`, `RLIMIT_CORE=0`). Your own shell gets its
   normal core-dump limit back.

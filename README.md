@@ -71,6 +71,8 @@ has been idle for 15 minutes.
 | `tacitty mv <old> <new>` | Rename an alias |
 | `tacitty ls` | List aliases and dates (never secrets) |
 | `tacitty get <alias> [--force]` | Print a secret to stdout (refuses a terminal without `--force`) |
+| `tacitty export [<alias> ...] -o <file> [--to <key>] [--to-file <file>] [--armor]` | Write aliases to an encrypted file to share with a colleague (passphrase, or their age/SSH public keys) |
+| `tacitty import <file> [-i <identity>] [--overwrite]` | Add the aliases from an export file to your vault |
 | `tacitty shell [-- <cmd> ...]` | Run your shell (or `<cmd>`) inside taciTTY |
 | `tacitty enable` / `disable` | Turn auto-start on or off |
 | `tacitty lock` / `unlock` / `status` | Lock, unlock or check the vault |
@@ -131,6 +133,7 @@ The [taciTTY guide](docs/GUIDE.md) covers everything else:
 - [**Install**](docs/GUIDE.md#install): the installer, verifying downloads, updating
 - [**How it works**](docs/GUIDE.md#how-it-works): how password prompts are detected, locally and over SSH
 - [**Auto-start**](docs/GUIDE.md#auto-start): what `tacitty init` changes, and how to switch it off
+- [**Sharing aliases securely**](docs/GUIDE.md#sharing): giving colleagues the same aliases with `tacitty export` / `import`
 - [**Security**](docs/GUIDE.md#security): threat model, protections and known limitations
 - [**Development**](docs/GUIDE.md#development): building, testing and releasing
 

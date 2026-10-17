@@ -1,5 +1,6 @@
 use std::io::Write;
 use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -9,6 +10,7 @@ use tacitty::agent::{self, Client};
 use tacitty::alias;
 use tacitty::autostart;
 use tacitty::config::{self, Config};
+use tacitty::export;
 use tacitty::secret::SecretBuf;
 use tacitty::sys;
 use tacitty::update;
@@ -84,6 +86,46 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
+    /// Write aliases to an encrypted file to share with someone.
+    #[command(after_help = "\
+With no --to / --to-file, the file is protected by an export passphrase
+(asked twice, at least 12 characters). Quote SSH keys given to --to:
+  --to \"ssh-ed25519 AAAA... alice@laptop\"
+The file is a standard age file holding CXF JSON.")]
+    Export {
+        /// Aliases to export (default: all of them).
+        #[arg(value_name = "ALIAS")]
+        aliases: Vec<String>,
+        /// File to write (created with mode 0600).
+        #[arg(short, long, value_name = "FILE")]
+        output: PathBuf,
+        /// Encrypt to this public key: age (age1...), ssh-ed25519 or
+        /// ssh-rsa. Repeatable.
+        #[arg(long = "to", value_name = "KEY")]
+        to: Vec<String>,
+        /// Encrypt to every public key in FILE, one per line (an
+        /// authorized_keys or GitHub .keys file). Repeatable.
+        #[arg(long = "to-file", value_name = "FILE")]
+        to_file: Vec<PathBuf>,
+        /// Write ASCII-armored text (for pasting into chat or email).
+        #[arg(long)]
+        armor: bool,
+        /// Replace FILE if it already exists.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Add aliases from a file made by `tacitty export`.
+    Import {
+        /// The export file (binary or armored).
+        file: PathBuf,
+        /// Age identity file or SSH private key to decrypt with. Repeatable.
+        /// Default: ~/.ssh/id_ed25519 and ~/.ssh/id_rsa.
+        #[arg(short = 'i', long = "identity", value_name = "IDENTITY")]
+        identity: Vec<PathBuf>,
+        /// Replace aliases that already exist in your vault.
+        #[arg(long)]
+        overwrite: bool,
+    },
     /// Run $SHELL (or a given command) inside the pty wrapper.
     Shell {
         /// Used by the shell rc hook: if the wrapper can't start, exit with
@@ -139,6 +181,19 @@ fn main() -> Result<()> {
         Cmd::Rm { alias } => cmd_rm(&alias),
         Cmd::Mv { old, new } => cmd_mv(&old, &new),
         Cmd::Ls => cmd_ls(),
+        Cmd::Export {
+            aliases,
+            output,
+            to,
+            to_file,
+            armor,
+            force,
+        } => cmd_export(&aliases, &output, &to, &to_file, armor, force),
+        Cmd::Import {
+            file,
+            identity,
+            overwrite,
+        } => cmd_import(&file, &identity, overwrite),
         Cmd::Get { alias, force } => cmd_get(&alias, force),
         Cmd::Shell { autostart, command } => cmd_shell(command, autostart),
         Cmd::Enable => cmd_enable(),
@@ -441,6 +496,196 @@ fn cmd_ls() -> Result<i32> {
         );
     }
     let _ = cfg;
+    Ok(0)
+}
+
+fn cmd_export(
+    aliases: &[String],
+    output: &Path,
+    to: &[String],
+    to_file: &[PathBuf],
+    armor: bool,
+    force: bool,
+) -> Result<i32> {
+    // Everything that can fail without a passphrase is checked first, so
+    // nobody types passphrases only to hit a bad key or an existing file.
+    export::check_output_path(output, force)?;
+    let mut recipients = Vec::new();
+    for key in to {
+        recipients.push(export::parse_recipient(key).map_err(|e| anyhow::anyhow!("--to: {e}"))?);
+    }
+    for file in to_file {
+        recipients.extend(export::read_recipients_file(file).map_err(|e| anyhow::anyhow!(e))?);
+    }
+    let path = config::vault_path()?;
+    if !vault::exists(&path) {
+        bail!("no vault found (run `tacitty init` first)");
+    }
+
+    let pass = read_passphrase("Master passphrase: ")?;
+    let data = vault::load(&path, &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
+    drop(pass);
+    let mut names: Vec<&str> = Vec::new();
+    if aliases.is_empty() {
+        names.extend(data.entries.keys().map(String::as_str));
+    } else {
+        for a in aliases {
+            if !data.entries.contains_key(a) {
+                bail!("no such alias: {a} (nothing was exported)");
+            }
+            if !names.contains(&a.as_str()) {
+                names.push(a);
+            }
+        }
+    }
+    if names.is_empty() {
+        bail!("the vault has no aliases to export");
+    }
+    let entries: Vec<export::ExportEntry> = names
+        .iter()
+        .map(|&a| {
+            let e = &data.entries[a];
+            export::ExportEntry {
+                alias: a,
+                secret: e.secret.as_slice(),
+                created: e.created,
+                updated: e.updated,
+            }
+        })
+        .collect();
+    let plain = export::encode_cxf(&entries, vault::now_unix())?;
+
+    let recipient_count = recipients.len();
+    let protection = if recipients.is_empty() {
+        let first = read_passphrase("Export passphrase: ")?;
+        let second = read_passphrase("Confirm export passphrase: ")?;
+        use secrecy::ExposeSecret;
+        if first.expose_secret() != second.expose_secret() {
+            bail!("passphrases did not match");
+        }
+        export::check_passphrase(&first).map_err(|e| anyhow::anyhow!(e))?;
+        export::Protection::Passphrase(first)
+    } else {
+        export::Protection::Recipients(recipients)
+    };
+    let cipher = export::encrypt(&plain, &protection, armor)?;
+    drop(plain);
+    export::write_export_file(output, &cipher, force)?;
+
+    let list: Vec<String> = names.iter().map(|a| format!("@{a}")).collect();
+    outln!(
+        "Exported {} alias{} to {}: {}",
+        names.len(),
+        if names.len() == 1 { "" } else { "es" },
+        output.display(),
+        list.join(", ")
+    );
+    let form = if armor { "armored" } else { "binary" };
+    if recipient_count == 0 {
+        outln!("Protected by the export passphrase ({form} age file).");
+        outln!("Send the passphrase over a different channel than the file.");
+    } else {
+        outln!(
+            "Encrypted to {recipient_count} public key{} ({form} age file).",
+            if recipient_count == 1 { "" } else { "s" }
+        );
+    }
+    Ok(0)
+}
+
+/// Ask for an SSH private key's passphrase (only when it is needed).
+fn ask_key_passphrase(prompt: &str) -> Option<SecretString> {
+    read_passphrase(prompt).ok()
+}
+
+fn cmd_import(file: &Path, identity: &[PathBuf], overwrite: bool) -> Result<i32> {
+    let path = config::vault_path()?;
+    if !vault::exists(&path) {
+        bail!("no vault found (run `tacitty init` first)");
+    }
+    if load_config()?.backend != tacitty::backend::BackendKind::Native {
+        bail!("`tacitty import` writes to the native vault, but another backend is configured");
+    }
+    let cipher = export::read_export_file(file)?;
+    let kind = export::inspect(&cipher).map_err(|e| anyhow::anyhow!("{}: {e}", file.display()))?;
+
+    let plain = if kind.passphrase {
+        let pass = read_passphrase("Export file passphrase: ")?;
+        export::decrypt_with_passphrase(&cipher, &pass)?
+    } else {
+        let mut files: Vec<PathBuf> = identity.to_vec();
+        if files.is_empty() {
+            let home = std::env::var_os("HOME").map(PathBuf::from);
+            for name in ["id_ed25519", "id_rsa"] {
+                if let Some(p) = home.as_ref().map(|h| h.join(".ssh").join(name)) {
+                    if p.is_file() {
+                        files.push(p);
+                    }
+                }
+            }
+            if files.is_empty() {
+                bail!(
+                    "{} is encrypted to public keys; pass your private key with -i \
+                     (no ~/.ssh/id_ed25519 or ~/.ssh/id_rsa found)",
+                    file.display()
+                );
+            }
+        }
+        let mut ids = Vec::new();
+        for f in &files {
+            ids.extend(export::load_identities(f, ask_key_passphrase)?);
+        }
+        match export::decrypt_with_identities(&cipher, &ids) {
+            Err(export::ExportError::NoMatchingIdentity) => {
+                let tried: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
+                bail!(
+                    "{} was not encrypted to any of your keys (tried {})",
+                    file.display(),
+                    tried.join(", ")
+                );
+            }
+            other => other?,
+        }
+    };
+    let decoded = export::decode_cxf(&plain)?;
+    drop(plain);
+
+    let report = if decoded.items.is_empty() {
+        export::ImportReport {
+            skipped: decoded.skipped,
+            ..Default::default()
+        }
+    } else {
+        let pass = read_passphrase("Master passphrase: ")?;
+        let mut data = vault::load(&path, &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let report = export::merge_into(&mut data, decoded, overwrite);
+        if !report.added.is_empty() || !report.replaced.is_empty() {
+            vault::save(&path, &pass, &data).map_err(|e| anyhow::anyhow!("{e}"))?;
+            if let Ok(mut c) = Client::connect(&config::agent_sock_path()?) {
+                let _ = c.lock();
+            }
+        }
+        report
+    };
+
+    let at = |v: &[String]| v.iter().map(|a| format!("@{a}")).collect::<Vec<_>>();
+    let mut imported = at(&report.added);
+    imported.extend(
+        at(&report.replaced)
+            .into_iter()
+            .map(|a| format!("{a} (replaced)")),
+    );
+    if imported.is_empty() {
+        outln!("Imported nothing.");
+    } else {
+        outln!("Imported {}: {}", imported.len(), imported.join(", "));
+    }
+    if !report.skipped.is_empty() {
+        outln!("Skipped {}:", report.skipped.len());
+        for s in &report.skipped {
+            outln!("  {}: {}", s.title, s.reason);
+        }
+    }
     Ok(0)
 }
 

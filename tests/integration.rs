@@ -536,3 +536,202 @@ fn long_multibyte_output_line_does_not_crash() {
     p.send_line("exit").unwrap();
     p.exp_eof().unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// export / import
+// ---------------------------------------------------------------------------
+
+const EXPORT_PASS: &str = "share this one separately";
+
+fn exited_ok(p: &mut rexpect::session::PtySession) -> bool {
+    matches!(
+        p.process().wait(),
+        Ok(rexpect::process::wait::WaitStatus::Exited(_, 0))
+    )
+}
+
+/// `tacitty export <args>` with an export passphrase; returns whether it
+/// succeeded and its output.
+fn export_with_passphrase(env: &Env, args: &[&str], export_pass: &str) -> (bool, String) {
+    let mut p = env.spawn(args, 15_000);
+    p.exp_string("Master passphrase:").unwrap();
+    p.send_line(PASSPHRASE).unwrap();
+    p.exp_string("Export passphrase:").unwrap();
+    p.send_line(export_pass).unwrap();
+    p.exp_string("Confirm export passphrase:").unwrap();
+    p.send_line(export_pass).unwrap();
+    let out = p.exp_eof().unwrap();
+    (exited_ok(&mut p), out)
+}
+
+/// `tacitty import <file> [extra]` for a passphrase-protected file.
+fn import_file(env: &Env, file: &str, extra: &[&str]) -> String {
+    let mut args = vec!["import", file];
+    args.extend_from_slice(extra);
+    let mut p = env.spawn(&args, 15_000);
+    p.exp_string("Export file passphrase:").unwrap();
+    p.send_line(EXPORT_PASS).unwrap();
+    p.exp_string("Master passphrase:").unwrap();
+    p.send_line(PASSPHRASE).unwrap();
+    let out = p.exp_eof().unwrap();
+    assert!(exited_ok(&mut p), "import failed: {out:?}");
+    out
+}
+
+/// The secret stored under `alias`, via `tacitty get` with stdout piped.
+fn stored_secret(env: &Env, alias: &str) -> String {
+    // Lock first so the unlock always prompts (and reloads the vault),
+    // whether or not the import just locked the agent.
+    assert!(env.command(&["lock"]).output().unwrap().status.success());
+    unlock_agent(env, PASSPHRASE);
+    let out = env.command(&["get", alias]).output().unwrap();
+    assert!(out.status.success(), "get failed: {out:?}");
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[test]
+fn exported_alias_resolves_after_import_elsewhere() {
+    let alice = setup_with_alias("prod-db", "s3cr3t!");
+    add_alias(&alice, "other", "not-exported", PASSPHRASE);
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("prod.tacitty");
+    let file_s = file.to_str().unwrap();
+
+    let (ok, out) =
+        export_with_passphrase(&alice, &["export", "prod-db", "-o", file_s], EXPORT_PASS);
+    assert!(ok, "export failed: {out:?}");
+    assert!(out.contains("Exported 1 alias"), "{out:?}");
+    assert!(!out.contains("s3cr3t!"), "{out:?}");
+    use std::os::unix::fs::PermissionsExt;
+    let md = std::fs::metadata(&file).unwrap();
+    assert_eq!(md.permissions().mode() & 0o777, 0o600);
+    let raw = std::fs::read(&file).unwrap();
+    assert!(raw.starts_with(b"age-encryption.org/v1\n"));
+    assert!(!raw.windows(7).any(|w| w == b"s3cr3t!"));
+
+    let bob = Env::fresh();
+    init_vault(&bob, PASSPHRASE);
+    let out = import_file(&bob, file_s, &[]);
+    assert!(out.contains("Imported 1: @prod-db"), "{out:?}");
+    assert!(!out.contains("other"), "{out:?}");
+    unlock_agent(&bob, PASSPHRASE);
+
+    let mut p = bob.spawn_shell(15_000);
+    p.send_line("bash -c 'read -s -p \"Password: \" pw; echo; echo GOT[$pw]'")
+        .unwrap();
+    p.exp_string("Password: ").unwrap();
+    p.send("@prod-db\r").unwrap();
+    p.flush().unwrap();
+    let (before, _) = p.exp_regex(r"GOT\[[^\]]*\]").unwrap();
+    assert!(
+        !before.contains("s3cr3t!"),
+        "secret leaked before GOT[..]: {before:?}"
+    );
+    p.exp_string("GOT[s3cr3t!]").unwrap();
+    p.send_line("exit").unwrap();
+    p.exp_eof().unwrap();
+}
+
+#[test]
+fn import_skips_existing_aliases_unless_overwrite() {
+    let alice = setup_with_alias("prod-db", "new-secret");
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("team.tacitty");
+    let file_s = file.to_str().unwrap();
+    let (ok, out) =
+        export_with_passphrase(&alice, &["export", "-o", file_s, "--armor"], EXPORT_PASS);
+    assert!(ok, "export failed: {out:?}");
+    assert!(std::fs::read(&file)
+        .unwrap()
+        .starts_with(b"-----BEGIN AGE ENCRYPTED FILE-----"));
+
+    let bob = setup_with_alias("prod-db", "old-secret");
+    let out = import_file(&bob, file_s, &[]);
+    assert!(out.contains("Imported nothing"), "{out:?}");
+    assert!(
+        out.contains("prod-db: already in your vault (use --overwrite"),
+        "{out:?}"
+    );
+    assert_eq!(stored_secret(&bob, "prod-db"), "old-secret");
+
+    let out = import_file(&bob, file_s, &["--overwrite"]);
+    assert!(out.contains("Imported 1: @prod-db (replaced)"), "{out:?}");
+    assert_eq!(stored_secret(&bob, "prod-db"), "new-secret");
+}
+
+#[test]
+fn export_to_ssh_key_imports_with_default_identity() {
+    let bob = Env::fresh();
+    init_vault(&bob, PASSPHRASE);
+    let ssh_dir = bob.home.join(".ssh");
+    std::fs::create_dir_all(&ssh_dir).unwrap();
+    let key = ssh_dir.join("id_ed25519");
+    let made = std::process::Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-C", "bob@host", "-f"])
+        .arg(&key)
+        .status();
+    if !matches!(made, Ok(s) if s.success()) {
+        eprintln!("note: ssh-keygen not available, skipping");
+        return;
+    }
+
+    let alice = setup_with_alias("rootpw", "r00t-pw");
+    let dir = tempfile::tempdir().unwrap();
+    let keys = dir.path().join("bob.keys");
+    let public = std::fs::read_to_string(key.with_extension("pub")).unwrap();
+    std::fs::write(&keys, format!("# Bob's laptop\n{public}\n")).unwrap();
+    let file = dir.path().join("for-bob.tacitty");
+    let file_s = file.to_str().unwrap();
+    let mut p = alice.spawn(
+        &[
+            "export",
+            "rootpw",
+            "--to-file",
+            keys.to_str().unwrap(),
+            "-o",
+            file_s,
+        ],
+        15_000,
+    );
+    p.exp_string("Master passphrase:").unwrap();
+    p.send_line(PASSPHRASE).unwrap();
+    p.exp_string("Encrypted to 1 public key").unwrap();
+    p.exp_eof().unwrap();
+    assert!(exited_ok(&mut p));
+
+    // No -i: ~/.ssh/id_ed25519 is used, and only the master passphrase is
+    // asked for.
+    let mut p = bob.spawn(&["import", file_s], 15_000);
+    p.exp_string("Master passphrase:").unwrap();
+    p.send_line(PASSPHRASE).unwrap();
+    let out = p.exp_eof().unwrap();
+    assert!(exited_ok(&mut p), "import failed: {out:?}");
+    assert!(out.contains("Imported 1: @rootpw"), "{out:?}");
+    assert_eq!(stored_secret(&bob, "rootpw"), "r00t-pw");
+
+    // Someone without the key gets a clear error.
+    let eve = Env::fresh();
+    init_vault(&eve, PASSPHRASE);
+    let out = eve.command(&["import", file_s]).output().unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("encrypted to public keys"), "{err}");
+}
+
+#[test]
+fn export_refuses_short_passphrase_and_existing_file() {
+    let alice = setup_with_alias("prod-db", "s3cr3t!");
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("x.tacitty");
+    let file_s = file.to_str().unwrap();
+    let (ok, out) = export_with_passphrase(&alice, &["export", "-o", file_s], "too short");
+    assert!(!ok);
+    assert!(out.contains("at least 12 characters"), "{out:?}");
+    assert!(!file.exists());
+
+    std::fs::write(&file, b"keep me").unwrap();
+    let out = alice.command(&["export", "-o", file_s]).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--force"));
+    assert_eq!(std::fs::read(&file).unwrap(), b"keep me");
+}

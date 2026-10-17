@@ -155,8 +155,8 @@ impl VaultData {
 /// Work-factor override for fast tests. Honoured only in unit tests and in
 /// builds with the `test-hooks` feature (used by the integration tests),
 /// never in normal debug or release builds, so a stray environment
-/// variable can't weaken a real vault.
-fn test_work_factor() -> Option<u8> {
+/// variable can't weaken a real vault or export file.
+pub(crate) fn test_work_factor() -> Option<u8> {
     if cfg!(any(test, feature = "test-hooks")) {
         std::env::var("TACITTY_TEST_WORK_FACTOR")
             .ok()

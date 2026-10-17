@@ -260,11 +260,17 @@ pub struct RunOptions {
     pub command: Option<Vec<String>>,
 }
 
+/// Are we already inside a `tacitty shell`? Then [`run`] doesn't wrap
+/// again; it just replaces itself with the plain shell.
+pub fn is_nested() -> bool {
+    std::env::var_os("TACITTY_ACTIVE").is_some()
+}
+
 /// Run `tacitty shell`: spawn the shell (or `options.command`) on a pty and
 /// proxy until it exits, intercepting alias triggers along the way. Returns
 /// the child's exit code (or 128+signal, matching normal shell convention).
 pub fn run(cfg: Config, options: RunOptions) -> anyhow::Result<i32> {
-    if std::env::var_os("TACITTY_ACTIVE").is_some() {
+    if is_nested() {
         eprintln!("tacitty: already active in this shell, not nesting");
         let shell = shell_command(&options);
         let err = exec_replace(shell);
@@ -646,6 +652,21 @@ fn shell_command(options: &RunOptions) -> Command {
         cmd
     } else {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        #[cfg(target_os = "macos")]
+        {
+            // macOS terminals start every shell as a login shell, so that
+            // is where macOS users keep their settings (bash then reads
+            // only ~/.bash_profile, not ~/.bashrc). Start it the same way,
+            // with a leading `-` in argv[0], so the shell inside tacitty is
+            // set up like the one the terminal would have started.
+            use std::os::unix::process::CommandExt;
+            let mut cmd = Command::new(&shell);
+            if let Some(name) = std::path::Path::new(&shell).file_name() {
+                cmd.arg0(format!("-{}", name.to_string_lossy()));
+            }
+            cmd
+        }
+        #[cfg(target_os = "linux")]
         Command::new(shell)
     }
 }

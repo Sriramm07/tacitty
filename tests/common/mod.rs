@@ -98,7 +98,8 @@ impl Drop for Env {
         // Client has no explicit "shut down the agent" RPC by design (see
         // spec §8.2 — its protocol is GET/LIST/LOCK/STATUS/UNLOCK only), so
         // ask the kernel which process is listening on this test's socket
-        // (SO_PEERCRED) and signal it directly. /proc/<pid>/environ can't be
+        // (SO_PEERCRED, or LOCAL_PEERPID on macOS) and signal it directly.
+        // /proc/<pid>/environ can't be
         // used for this: the agent marks itself non-dumpable, which makes
         // its environ unreadable even to the same user. This is test-only
         // cleanup, not something `tacitty` itself needs at runtime.
@@ -110,6 +111,7 @@ impl Drop for Env {
 }
 
 /// PID of the process serving the Unix socket at `sock`, if one is.
+#[cfg(target_os = "linux")]
 fn agent_pid(sock: &std::path::Path) -> Option<i32> {
     let stream = std::os::unix::net::UnixStream::connect(sock).ok()?;
     let mut cred = libc::ucred {
@@ -129,6 +131,25 @@ fn agent_pid(sock: &std::path::Path) -> Option<i32> {
         )
     };
     (rc == 0 && cred.pid > 0).then_some(cred.pid)
+}
+
+/// PID of the process serving the Unix socket at `sock`, if one is.
+#[cfg(target_os = "macos")]
+fn agent_pid(sock: &std::path::Path) -> Option<i32> {
+    let stream = std::os::unix::net::UnixStream::connect(sock).ok()?;
+    let mut pid: libc::pid_t = 0;
+    let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+    // SAFETY: `pid`/`len` describe a correctly sized buffer for LOCAL_PEERPID.
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            &mut pid as *mut libc::pid_t as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    (rc == 0 && pid > 0).then_some(pid)
 }
 
 pub fn init_vault(env: &Env, passphrase: &str) {

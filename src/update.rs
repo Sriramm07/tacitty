@@ -43,10 +43,19 @@ fn https_only() -> bool {
 
 /// The release target triple for this machine's prebuilt binary.
 pub fn target_triple() -> Result<&'static str> {
-    match std::env::consts::ARCH {
-        "x86_64" => Ok("x86_64-unknown-linux-musl"),
-        "aarch64" => Ok("aarch64-unknown-linux-musl"),
-        other => bail!("no prebuilt release for {other}; update by rebuilding from source"),
+    triple_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+/// The release target for `os`/`arch` (as in `std::env::consts`). This is
+/// the platform the running binary was built for, so an x86_64 build
+/// running under Rosetta on Apple Silicon updates to the x86_64 build.
+fn triple_for(os: &str, arch: &str) -> Result<&'static str> {
+    match (os, arch) {
+        ("linux", "x86_64") => Ok("x86_64-unknown-linux-musl"),
+        ("linux", "aarch64") => Ok("aarch64-unknown-linux-musl"),
+        ("macos", "x86_64") => Ok("x86_64-apple-darwin"),
+        ("macos", "aarch64") => Ok("aarch64-apple-darwin"),
+        _ => bail!("no prebuilt release for {os}/{arch}; update by rebuilding from source"),
     }
 }
 
@@ -242,7 +251,7 @@ pub fn run(check_only: bool) -> Result<Outcome> {
         .and_then(|p| p.canonicalize())
         .context("locating the running tacitty binary")?;
     let dir = exe.parent().context("binary has no parent directory")?;
-    if exe.starts_with("/usr") || exe.starts_with("/opt") {
+    if crate::autostart::is_packaged_install(&exe) {
         bail!(
             "{} looks like a system-managed install; update it with your package manager, \
              or reinstall with install.sh",
@@ -423,5 +432,23 @@ mod tests {
             asset_name("v0.1.0", "x86_64-unknown-linux-musl"),
             "tacitty-v0.1.0-x86_64-unknown-linux-musl"
         );
+        assert_eq!(
+            asset_name("v0.1.0", "aarch64-apple-darwin"),
+            "tacitty-v0.1.0-aarch64-apple-darwin"
+        );
+    }
+
+    #[test]
+    fn targets_match_release_workflow() {
+        for (os, arch, triple) in [
+            ("linux", "x86_64", "x86_64-unknown-linux-musl"),
+            ("linux", "aarch64", "aarch64-unknown-linux-musl"),
+            ("macos", "x86_64", "x86_64-apple-darwin"),
+            ("macos", "aarch64", "aarch64-apple-darwin"),
+        ] {
+            assert_eq!(triple_for(os, arch).unwrap(), triple);
+        }
+        assert!(triple_for("linux", "riscv64").is_err());
+        assert!(triple_for("freebsd", "x86_64").is_err());
     }
 }

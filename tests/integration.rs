@@ -357,6 +357,7 @@ fn broken_wrapper_falls_back_to_plain_shell() {
 /// real ssh client sets it), and the "remote" prints a password prompt and
 /// reads one line. The script is *named* `ssh` so the foreground-process
 /// allow-list matches it, exactly as it would for the real client.
+#[cfg(target_os = "linux")]
 fn fake_ssh(env: &Env) -> std::path::PathBuf {
     let bin = env.home.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -384,6 +385,98 @@ fn fake_ssh(env: &Env) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     path
+}
+
+/// Like the Linux [`fake_ssh`], but a compiled program: on macOS a script's
+/// process name is its interpreter's (`Python`), not the script's, so a
+/// script named `ssh` would never match the allow-list.
+#[cfg(target_os = "macos")]
+fn fake_ssh(env: &Env) -> std::path::PathBuf {
+    compile_fake_ssh(
+        env,
+        r#"
+#include <stdio.h>
+#include <termios.h>
+#include <unistd.h>
+int main(void) {
+    struct termios old, raw;
+    char pw[256], c;
+    size_t n = 0;
+    tcgetattr(0, &old);
+    raw = old;
+    cfmakeraw(&raw);
+    tcsetattr(0, TCSANOW, &raw);
+    write(1, "Password for user postgres: ", 28);
+    while (read(0, &c, 1) == 1 && c != '\r' && c != '\n')
+        if (n < sizeof pw - 1) pw[n++] = c;
+    pw[n] = 0;
+    tcsetattr(0, TCSANOW, &old);
+    printf("\nGOT[%s]\n", pw);
+    return 0;
+}
+"#,
+    )
+}
+
+/// Build `src` (C) into an executable named `ssh` with the system compiler
+/// (which the Rust toolchain needs anyway, as its linker).
+#[cfg(target_os = "macos")]
+fn compile_fake_ssh(env: &Env, src: &str) -> std::path::PathBuf {
+    let bin = env.home.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let c_file = env.home.join("fake_ssh.c");
+    std::fs::write(&c_file, src).unwrap();
+    let path = bin.join("ssh");
+    let status = std::process::Command::new("cc")
+        .arg("-o")
+        .arg(&path)
+        .arg(&c_file)
+        .status()
+        .expect("run cc");
+    assert!(status.success(), "compiling the fake ssh failed");
+    path
+}
+
+/// A fake `ssh` that leaves the local terminal echoing (like `ssh host
+/// 'sudo -S ...'` or `ssh -T`), prints a password prompt and reads a line.
+#[cfg(target_os = "linux")]
+fn fake_ssh_with_local_echo(env: &Env) -> std::path::PathBuf {
+    let bin = env.home.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let ssh = bin.join("ssh");
+    std::fs::write(
+        &ssh,
+        "#!/usr/bin/python3\n\
+         import sys\n\
+         sys.stdout.write('Password for user postgres: ')\n\
+         sys.stdout.flush()\n\
+         print('GOT[' + sys.stdin.readline().strip() + ']')\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ssh
+}
+
+/// See the Linux version and [`fake_ssh`] for why this is compiled.
+#[cfg(target_os = "macos")]
+fn fake_ssh_with_local_echo(env: &Env) -> std::path::PathBuf {
+    compile_fake_ssh(
+        env,
+        r#"
+#include <stdio.h>
+#include <string.h>
+int main(void) {
+    char line[256];
+    fputs("Password for user postgres: ", stdout);
+    fflush(stdout);
+    if (!fgets(line, sizeof line, stdin)) line[0] = 0;
+    line[strcspn(line, "\r\n")] = 0;
+    printf("GOT[%s]\n", line);
+    return 0;
+}
+"#,
+    )
 }
 
 #[test]
@@ -494,20 +587,7 @@ fn prompt_timeout_during_alias_sends_nothing() {
 #[test]
 fn remote_prompt_with_local_echo_on_gets_no_secret() {
     let env = setup_with_alias("db", "pg-s3cret");
-    let bin = env.home.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let ssh = bin.join("ssh");
-    std::fs::write(
-        &ssh,
-        "#!/usr/bin/python3\n\
-         import sys\n\
-         sys.stdout.write('Password for user postgres: ')\n\
-         sys.stdout.flush()\n\
-         print('GOT[' + sys.stdin.readline().strip() + ']')\n",
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let ssh = fake_ssh_with_local_echo(&env);
     let mut p = env.spawn_shell(15_000);
     p.send_line(&ssh.display().to_string()).unwrap();
     p.exp_string("Password for user postgres: ").unwrap();

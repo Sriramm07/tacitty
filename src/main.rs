@@ -51,7 +51,7 @@ fn stdout_failed(e: std::io::Error) -> ! {
 #[command(
     name = "tacitty",
     version,
-    about = "Prompt-aware password alias injector for Linux terminals"
+    about = "Prompt-aware password alias injector for Linux and macOS terminals"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -163,14 +163,20 @@ The file is a standard age file holding CXF JSON.")]
 }
 
 fn main() -> Result<()> {
+    let cli = Cli::parse();
     // Every command may hold the decrypted vault or the master passphrase
     // in memory, so all of them refuse core dumps and debugger attachment.
-    sys::harden_process();
+    // The one exception is a `tacitty shell` started inside another one:
+    // it holds nothing and only execs the plain shell (`wrapper::run`), and
+    // on macOS the debugger block would survive that exec and stick to the
+    // user's shell.
+    if !(matches!(cli.cmd, Cmd::Shell { .. }) && wrapper::is_nested()) {
+        sys::harden_process();
+    }
     // Writes to a closed pipe (a helper program, the agent socket, or
     // stdout) return an error instead of killing the process; stdout is
     // handled by `outln!` / `out!`.
     sys::ignore_sigpipe();
-    let cli = Cli::parse();
     let code = match cli.cmd {
         Cmd::Init { no_autostart } => cmd_init(no_autostart),
         Cmd::Add {

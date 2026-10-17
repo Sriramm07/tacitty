@@ -350,6 +350,10 @@ pub fn run(sock_path: &Path, cfg: &Config) -> Result<(), AgentError> {
     let listener = UnixListener::bind(sock_path)?;
     std::fs::set_permissions(sock_path, std::fs::Permissions::from_mode(0o600))?;
     listener.set_nonblocking(true)?;
+    #[cfg(target_os = "macos")]
+    let bound_socket = file_identity(sock_path);
+    #[cfg(target_os = "macos")]
+    let mut socket_lost = false;
 
     sys::harden_process();
     let _ = sys::install_flag_handler(&[libc::SIGTERM, libc::SIGINT]);
@@ -366,6 +370,17 @@ pub fn run(sock_path: &Path, cfg: &Config) -> Result<(), AgentError> {
 
     loop {
         if sys::SIGNAL_FLAG.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        // macOS deletes files in the per-user temporary directory (where
+        // the socket lives, see `config::runtime_dir`) once they have gone
+        // unused for a few days. Nobody can reach an agent whose socket is
+        // gone, so shut down rather than linger with the vault in memory;
+        // the next client starts a fresh agent.
+        #[cfg(target_os = "macos")]
+        if bound_socket.is_some() && file_identity(sock_path) != bound_socket {
+            crate::logging::event("agent: socket removed, shut down");
+            socket_lost = true;
             break;
         }
         {
@@ -391,10 +406,25 @@ pub fn run(sock_path: &Path, cfg: &Config) -> Result<(), AgentError> {
         }
     }
 
+    // Files at these paths now may belong to a newer agent.
+    #[cfg(target_os = "macos")]
+    if socket_lost {
+        return Ok(());
+    }
     let _ = std::fs::remove_file(sock_path);
     let _ = std::fs::remove_file(&lock_path);
     crate::logging::event("agent: shut down");
     Ok(())
+}
+
+/// Device and inode of the file at `path`, to tell whether it is still
+/// the one this agent created.
+#[cfg(target_os = "macos")]
+fn file_identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(path)
+        .ok()
+        .map(|m| (m.dev(), m.ino()))
 }
 
 fn handle_conn(mut stream: UnixStream, state: Arc<Mutex<ServerState>>) -> Result<(), AgentError> {

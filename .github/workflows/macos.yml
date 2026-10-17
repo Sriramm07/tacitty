@@ -1,0 +1,45 @@
+name: macOS tests
+
+# Run by hand (Actions tab -> "macOS tests" -> Run workflow) to check the
+# macOS port on real Macs: GitHub's Apple Silicon and Intel runners. It
+# builds, runs the unit tests and the pty integration tests, and runs
+# `tacitty doctor`. Nothing here can write to the repository.
+#
+# Runner labels: `macos-15` is Apple Silicon, `macos-15-intel` is the
+# Intel image (`macos-13`, the old Intel label, has been retired).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: stable
+
+      - name: build
+        run: cargo build --locked
+
+      - name: unit tests
+        run: cargo test --locked --lib
+
+      # One at a time, as in docs/GUIDE.md: each test starts its own agent.
+      - name: integration tests
+        run: cargo test --locked --features test-hooks --test integration -- --test-threads=1
+
+      - name: doctor
+        run: ./target/debug/tacitty doctor

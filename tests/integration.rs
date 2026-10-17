@@ -10,7 +10,7 @@
 
 mod common;
 
-use common::{add_alias, init_vault, unlock_agent, Env};
+use common::{add_alias, add_alias_in, init_vault, unlock_agent, Env};
 
 const PASSPHRASE: &str = "correct horse battery staple";
 
@@ -631,6 +631,16 @@ fn exited_ok(p: &mut rexpect::session::PtySession) -> bool {
     )
 }
 
+/// Run a command that asks only for the master passphrase; returns whether
+/// it succeeded and its output (stdout and stderr: both go to the pty).
+fn with_master(env: &Env, args: &[&str]) -> (bool, String) {
+    let mut p = env.spawn(args, 15_000);
+    p.exp_string("Master passphrase:").unwrap();
+    p.send_line(PASSPHRASE).unwrap();
+    let out = p.exp_eof().unwrap();
+    (exited_ok(&mut p), out)
+}
+
 /// `tacitty export <args>` with an export passphrase; returns whether it
 /// succeeded and its output.
 fn export_with_passphrase(env: &Env, args: &[&str], export_pass: &str) -> (bool, String) {
@@ -693,7 +703,8 @@ fn exported_alias_resolves_after_import_elsewhere() {
     let bob = Env::fresh();
     init_vault(&bob, PASSPHRASE);
     let out = import_file(&bob, file_s, &[]);
-    assert!(out.contains("Imported 1: @prod-db"), "{out:?}");
+    assert!(out.contains("Imported 1 alias:"), "{out:?}");
+    assert!(out.contains("group default: @prod-db"), "{out:?}");
     assert!(!out.contains("other"), "{out:?}");
     unlock_agent(&bob, PASSPHRASE);
 
@@ -736,7 +747,10 @@ fn import_skips_existing_aliases_unless_overwrite() {
     assert_eq!(stored_secret(&bob, "prod-db"), "old-secret");
 
     let out = import_file(&bob, file_s, &["--overwrite"]);
-    assert!(out.contains("Imported 1: @prod-db (replaced)"), "{out:?}");
+    assert!(
+        out.contains("group default: @prod-db (replaced)"),
+        "{out:?}"
+    );
     assert_eq!(stored_secret(&bob, "prod-db"), "new-secret");
 }
 
@@ -757,7 +771,22 @@ fn export_to_ssh_key_imports_with_default_identity() {
     }
 
     let alice = setup_with_alias("rootpw", "r00t-pw");
+    let (ok, out) = with_master(&alice, &["group", "move", "rootpw", "--to", "ops"]);
+    assert!(ok, "{out:?}");
     let dir = tempfile::tempdir().unwrap();
+
+    // Garbage is refused before any passphrase is asked for.
+    let out = alice
+        .command(&["export", "--with-key", "nonsense.pub", "-o", "x.tacitty"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("--with-key: `nonsense.pub` is not a public key"),
+        "{err}"
+    );
+
     let keys = dir.path().join("bob.keys");
     let public = std::fs::read_to_string(key.with_extension("pub")).unwrap();
     std::fs::write(&keys, format!("# Bob's laptop\n{public}\n")).unwrap();
@@ -767,7 +796,7 @@ fn export_to_ssh_key_imports_with_default_identity() {
         &[
             "export",
             "rootpw",
-            "--to-file",
+            "--with-key",
             keys.to_str().unwrap(),
             "-o",
             file_s,
@@ -787,7 +816,7 @@ fn export_to_ssh_key_imports_with_default_identity() {
     p.send_line(PASSPHRASE).unwrap();
     let out = p.exp_eof().unwrap();
     assert!(exited_ok(&mut p), "import failed: {out:?}");
-    assert!(out.contains("Imported 1: @rootpw"), "{out:?}");
+    assert!(out.contains("group ops: @rootpw"), "{out:?}");
     assert_eq!(stored_secret(&bob, "rootpw"), "r00t-pw");
 
     // Someone without the key gets a clear error.
@@ -815,4 +844,217 @@ fn export_refuses_short_passphrase_and_existing_file() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("--force"));
     assert_eq!(std::fs::read(&file).unwrap(), b"keep me");
+}
+
+// ---------------------------------------------------------------------------
+// groups
+// ---------------------------------------------------------------------------
+
+/// `tacitty <args>`, which must succeed; returns its output.
+fn ok_with_master(env: &Env, args: &[&str]) -> String {
+    let (ok, out) = with_master(env, args);
+    assert!(ok, "`tacitty {}` failed: {out:?}", args.join(" "));
+    out
+}
+
+/// `tacitty <args>`, which must fail after the passphrase; returns its output.
+fn fails_with_master(env: &Env, args: &[&str]) -> String {
+    let (ok, out) = with_master(env, args);
+    assert!(
+        !ok,
+        "`tacitty {}` should have failed: {out:?}",
+        args.join(" ")
+    );
+    out
+}
+
+/// Position of `needle` in `hay`, which must contain it.
+fn pos(hay: &str, needle: &str) -> usize {
+    hay.find(needle)
+        .unwrap_or_else(|| panic!("{needle:?} not in {hay:?}"))
+}
+
+#[test]
+fn add_and_ls_by_group() {
+    let env = Env::fresh();
+    init_vault(&env, PASSPHRASE);
+    add_alias(&env, "home", "h-pw", PASSPHRASE);
+    add_alias_in(&env, "proddb", "prod", "p-pw", PASSPHRASE);
+    add_alias_in(&env, "rootpw", "prod", "r-pw", PASSPHRASE);
+
+    let out = ok_with_master(&env, &["ls"]);
+    assert!(!out.contains("-pw"), "secret shown: {out:?}");
+    let default = pos(&out, "default (default)\r\n  @home ");
+    let prod = pos(&out, "\r\nprod\r\n  @proddb ");
+    assert!(default < prod, "{out:?}");
+    assert!(pos(&out, "@rootpw") > prod, "{out:?}");
+    assert!(out.contains("created ") && out.contains(" UTC"), "{out:?}");
+
+    let out = ok_with_master(&env, &["ls", "-g", "prod"]);
+    assert!(
+        out.contains("@proddb") && out.contains("@rootpw"),
+        "{out:?}"
+    );
+    assert!(
+        !out.contains("@home") && !out.contains("default"),
+        "{out:?}"
+    );
+    assert!(fails_with_master(&env, &["ls", "--group", "nope"]).contains("no such group: nope"));
+
+    let out = ok_with_master(&env, &["group", "ls"]);
+    assert!(out.contains("default"), "{out:?}");
+    assert!(out.contains("1 alias  (default)"), "{out:?}");
+    assert!(out.contains("2 aliases"), "{out:?}");
+
+    // Invalid names are refused before anything is asked.
+    for args in [
+        &["add", "x", "-g", "bad/name"][..],
+        &["ls", "-g", "_oops"],
+        &["group", "move", "home", "--to", "a b"],
+    ] {
+        let out = env.command(args).output().unwrap();
+        assert!(!out.status.success(), "{args:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("invalid group name"), "{args:?}: {err}");
+    }
+}
+
+#[test]
+fn group_move_rename_rm_and_default() {
+    let env = Env::fresh();
+    init_vault(&env, PASSPHRASE);
+    add_alias(&env, "home", "h-pw", PASSPHRASE);
+    add_alias_in(&env, "proddb", "prod", "p-pw", PASSPHRASE);
+    add_alias(&env, "rootpw", "r-pw", PASSPHRASE);
+
+    // move: an unknown alias changes nothing.
+    let out = fails_with_master(&env, &["group", "move", "rootpw", "nope", "--to", "prod"]);
+    assert!(out.contains("no such alias: nope"), "{out:?}");
+    assert!(!ok_with_master(&env, &["ls", "-g", "prod"]).contains("@rootpw"));
+    let out = ok_with_master(&env, &["group", "move", "rootpw", "proddb", "--to", "prod"]);
+    assert!(out.contains("Moved @rootpw to group prod."), "{out:?}");
+    assert!(out.contains("Already in group prod: @proddb."), "{out:?}");
+    let out = ok_with_master(&env, &["group", "move", "home", "--to", "personal"]);
+    assert!(out.contains("Moved @home to group personal."), "{out:?}");
+
+    // rename: never onto an existing group.
+    let out = fails_with_master(&env, &["group", "rename", "prod", "personal"]);
+    assert!(out.contains("group personal already exists"), "{out:?}");
+    assert!(out.contains("tacitty group move"), "{out:?}");
+    let out = ok_with_master(&env, &["group", "rename", "prod", "production"]);
+    assert!(
+        out.contains("Renamed group prod to production (2 aliases)."),
+        "{out:?}"
+    );
+    let out = ok_with_master(&env, &["ls", "-g", "production"]);
+    assert!(
+        out.contains("@proddb") && out.contains("@rootpw"),
+        "{out:?}"
+    );
+
+    // rm: never the default group; aliases move to the default group.
+    let out = fails_with_master(&env, &["group", "rm", "default"]);
+    assert!(out.contains("default is the default group"), "{out:?}");
+    let out = ok_with_master(&env, &["group", "rm", "personal"]);
+    assert!(out.contains("Removed group personal."), "{out:?}");
+    assert!(out.contains("Moved @home to group default."), "{out:?}");
+
+    // default: show and set; new aliases follow it, renames carry it along.
+    let out = ok_with_master(&env, &["group", "default"]);
+    assert!(out.contains("group default (the default group)"), "{out:?}");
+    let out = ok_with_master(&env, &["group", "default", "production"]);
+    assert!(
+        out.contains("New aliases now go into group production."),
+        "{out:?}"
+    );
+    add_alias(&env, "newone", "n-pw", PASSPHRASE);
+    assert!(ok_with_master(&env, &["ls", "-g", "production"]).contains("@newone"));
+    let out = ok_with_master(&env, &["group", "rename", "production", "live"]);
+    assert!(out.contains("live is still the default group"), "{out:?}");
+    let out = ok_with_master(&env, &["group", "ls"]);
+    assert!(out.contains("3 aliases  (default)"), "{out:?}");
+    assert!(pos(&out, "live") > pos(&out, "default"), "{out:?}");
+    assert!(!out.contains("production"), "{out:?}");
+
+    // `mv` keeps the alias in its group.
+    ok_with_master(&env, &["mv", "home", "house"]);
+    assert!(ok_with_master(&env, &["ls", "-g", "default"]).contains("@house"));
+}
+
+#[test]
+fn alias_resolves_after_moving_between_groups() {
+    let env = setup_with_alias("proddb", "s3cr3t!");
+    ok_with_master(&env, &["group", "move", "proddb", "--to", "prod"]);
+    ok_with_master(&env, &["group", "move", "proddb", "--to", "ops"]);
+    // Each change locks the agent, so it reloads the vault on unlock.
+    unlock_agent(&env, PASSPHRASE);
+    let mut p = env.spawn_shell(15_000);
+    p.send_line("bash -c 'read -s -p \"Password: \" pw; echo; echo GOT[$pw]'")
+        .unwrap();
+    p.exp_string("Password: ").unwrap();
+    p.send("@proddb\r").unwrap();
+    p.flush().unwrap();
+    let (before, _) = p.exp_regex(r"GOT\[[^\]]*\]").unwrap();
+    assert!(!before.contains("s3cr3t!"), "secret leaked: {before:?}");
+    p.exp_string("GOT[s3cr3t!]").unwrap();
+    p.send_line("exit").unwrap();
+    p.exp_eof().unwrap();
+}
+
+#[test]
+fn exported_groups_survive_import() {
+    let alice = Env::fresh();
+    init_vault(&alice, PASSPHRASE);
+    add_alias(&alice, "notmine", "x-pw", PASSPHRASE);
+    add_alias_in(&alice, "proddb", "prod", "p-pw", PASSPHRASE);
+    add_alias_in(&alice, "rootpw", "prod", "r-pw", PASSPHRASE);
+    add_alias_in(&alice, "home", "personal", "h-pw", PASSPHRASE);
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("prod.tacitty");
+    let file_s = file.to_str().unwrap();
+
+    let out = fails_with_master(&alice, &["export", "-g", "nope", "-o", file_s]);
+    assert!(out.contains("no such group: nope"), "{out:?}");
+    assert!(!file.exists());
+
+    // A group plus a named alias from another group.
+    let (ok, out) = export_with_passphrase(
+        &alice,
+        &["export", "--group", "prod", "home", "-o", file_s],
+        EXPORT_PASS,
+    );
+    assert!(ok, "export failed: {out:?}");
+    assert!(out.contains("Exported 3 aliases"), "{out:?}");
+    assert!(out.contains("group personal: @home"), "{out:?}");
+    assert!(out.contains("group prod: @proddb, @rootpw"), "{out:?}");
+    assert!(!out.contains("notmine"), "{out:?}");
+
+    // Bob's default group is different; the file's groups win.
+    let bob = Env::fresh();
+    init_vault(&bob, PASSPHRASE);
+    ok_with_master(&bob, &["group", "default", "inbox"]);
+    let out = import_file(&bob, file_s, &[]);
+    assert!(out.contains("Imported 3 aliases:"), "{out:?}");
+    assert!(out.contains("group personal: @home"), "{out:?}");
+    assert!(out.contains("group prod: @proddb, @rootpw"), "{out:?}");
+    let out = ok_with_master(&bob, &["ls", "-g", "prod"]);
+    assert!(
+        out.contains("@proddb") && out.contains("@rootpw"),
+        "{out:?}"
+    );
+    assert!(!out.contains("@home"), "{out:?}");
+    assert_eq!(stored_secret(&bob, "rootpw"), "r-pw");
+
+    // --group puts everything in one group.
+    let out = import_file(&bob, file_s, &["--overwrite", "--group", "shared"]);
+    assert!(
+        out.contains("group shared: @home (replaced), @proddb (replaced), @rootpw (replaced)"),
+        "{out:?}"
+    );
+    let out = ok_with_master(&bob, &["group", "ls"]);
+    assert!(
+        out.contains("shared") && out.contains("3 aliases"),
+        "{out:?}"
+    );
+    assert!(!out.contains("prod"), "{out:?}");
 }

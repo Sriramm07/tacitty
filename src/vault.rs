@@ -1,17 +1,24 @@
 //! The native vault: a single age-encrypted (scrypt passphrase) file holding
-//! `alias -> secret` entries.
+//! `alias -> secret` entries, each in a group (see `group.rs`).
 //!
 //! Plaintext layout (private, versioned, parsed by hand so secrets never pass
 //! through a general-purpose deserializer that copies them around):
 //!
 //! ```text
-//! "PWV1\n"
-//! u32  entry count                       (big endian)
+//! "PWV2\n"
+//! u16  default_group_len, default group bytes (ASCII)   (big endian)
+//! u32  entry count
 //! per entry:
 //!   u16 alias_len, alias bytes (ASCII)
+//!   u16 group_len, group bytes (ASCII)
 //!   u32 secret_len, secret bytes
 //!   u64 created (unix seconds), u64 updated
 //! ```
+//!
+//! Saves always write version 2. Version 1 (`"PWV1\n"`, written before
+//! groups existed) is still read: it is the same without the two group
+//! fields, and every alias in it is put in the group `default`, which is
+//! also its default group.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -24,10 +31,12 @@ use secrecy::{ExposeSecret, SecretString};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
+use crate::group;
 use crate::secret::SecretBuf;
 use crate::sys;
 
-const MAGIC: &[u8] = b"PWV1\n";
+const MAGIC_V1: &[u8] = b"PWV1\n";
+const MAGIC: &[u8] = b"PWV2\n";
 const MAX_PLAINTEXT: usize = 16 * 1024 * 1024;
 /// Longest secret we accept (keeps the worst-case quoted payload well below
 /// the kernel's 4096-byte canonical line limit).
@@ -51,13 +60,25 @@ pub enum VaultError {
 
 pub struct Entry {
     pub secret: SecretBuf,
+    /// The group this alias belongs to (always a valid group name).
+    pub group: String,
     pub created: u64,
     pub updated: u64,
 }
 
-#[derive(Default)]
 pub struct VaultData {
     pub entries: BTreeMap<String, Entry>,
+    /// The group new aliases go into when none is named.
+    pub default_group: String,
+}
+
+impl Default for VaultData {
+    fn default() -> Self {
+        VaultData {
+            entries: BTreeMap::new(),
+            default_group: group::DEFAULT.to_string(),
+        }
+    }
 }
 
 pub fn now_unix() -> u64 {
@@ -72,33 +93,144 @@ impl VaultData {
         Self::default()
     }
 
+    /// Store `secret` under `alias`. An existing alias keeps its group; a
+    /// new one goes into the default group.
     pub fn put(&mut self, alias: &str, secret: &[u8]) {
+        let group = self
+            .entries
+            .get(alias)
+            .map_or_else(|| self.default_group.clone(), |e| e.group.clone());
+        self.put_in(alias, secret, &group);
+    }
+
+    /// Store `secret` under `alias` in `group` (already validated by the
+    /// caller), moving the alias there if it exists in another group.
+    pub fn put_in(&mut self, alias: &str, secret: &[u8], group: &str) {
         let now = now_unix();
         let created = self.entries.get(alias).map_or(now, |e| e.created);
         self.entries.insert(
             alias.to_string(),
             Entry {
                 secret: SecretBuf::from_slice(secret),
+                group: group.to_string(),
                 created,
                 updated: now,
             },
         );
     }
 
+    /// Every group with the number of aliases in it, by name. The default
+    /// group is always included, even when it is empty.
+    pub fn groups(&self) -> BTreeMap<&str, usize> {
+        let mut out = BTreeMap::new();
+        out.insert(self.default_group.as_str(), 0);
+        for e in self.entries.values() {
+            *out.entry(e.group.as_str()).or_insert(0) += 1;
+        }
+        out
+    }
+
+    pub fn has_group(&self, name: &str) -> bool {
+        self.default_group == name || self.entries.values().any(|e| e.group == name)
+    }
+
+    /// Move `aliases` into `group` (created implicitly). If any alias is
+    /// unknown, nothing is changed. Returns the aliases that weren't
+    /// already in `group`.
+    pub fn move_to_group(
+        &mut self,
+        aliases: &[String],
+        group: &str,
+    ) -> Result<Vec<String>, String> {
+        group::validate(group)?;
+        if let Some(a) = aliases.iter().find(|a| !self.entries.contains_key(*a)) {
+            return Err(format!("no such alias: {a} (nothing was moved)"));
+        }
+        let mut moved = Vec::new();
+        for a in aliases {
+            if let Some(e) = self.entries.get_mut(a) {
+                if e.group != group {
+                    e.group = group.to_string();
+                    moved.push(a.clone());
+                }
+            }
+        }
+        Ok(moved)
+    }
+
+    /// Rename a group, refusing to merge it into one that already exists.
+    /// If `old` is the default group, the default follows the new name.
+    /// Returns how many aliases the group holds.
+    pub fn rename_group(&mut self, old: &str, new: &str) -> Result<usize, String> {
+        group::validate(new)?;
+        if !self.has_group(old) {
+            return Err(format!("no such group: {old}"));
+        }
+        if self.has_group(new) {
+            return Err(format!(
+                "group {new} already exists (to move aliases into it, use \
+                 `tacitty group move <alias>... --to {new}`)"
+            ));
+        }
+        let mut n = 0;
+        for e in self.entries.values_mut().filter(|e| e.group == old) {
+            e.group = new.to_string();
+            n += 1;
+        }
+        if self.default_group == old {
+            self.default_group = new.to_string();
+        }
+        Ok(n)
+    }
+
+    /// Delete a group by moving its aliases into the default group (no
+    /// secret is ever deleted). Refuses the default group itself. Returns
+    /// the aliases that were moved.
+    pub fn remove_group(&mut self, name: &str) -> Result<Vec<String>, String> {
+        if name == self.default_group {
+            return Err(format!(
+                "{name} is the default group and can't be removed (make another \
+                 group the default first with `tacitty group default <group>`)"
+            ));
+        }
+        if !self.has_group(name) {
+            return Err(format!("no such group: {name}"));
+        }
+        let mut moved = Vec::new();
+        for (a, e) in self.entries.iter_mut().filter(|(_, e)| e.group == name) {
+            e.group.clone_from(&self.default_group);
+            moved.push(a.clone());
+        }
+        Ok(moved)
+    }
+
+    /// Make `name` the group new aliases go into (created implicitly).
+    pub fn set_default_group(&mut self, name: &str) -> Result<(), String> {
+        group::validate(name)?;
+        self.default_group = name.to_string();
+        Ok(())
+    }
+
     fn encode(&self) -> Zeroizing<Vec<u8>> {
         let cap = MAGIC.len()
+            + 2
+            + self.default_group.len()
             + 4
             + self
                 .entries
                 .iter()
-                .map(|(a, e)| 2 + a.len() + 4 + e.secret.len() + 16)
+                .map(|(a, e)| 2 + a.len() + 2 + e.group.len() + 4 + e.secret.len() + 16)
                 .sum::<usize>();
         let mut out = Zeroizing::new(Vec::with_capacity(cap));
         out.extend_from_slice(MAGIC);
+        out.extend_from_slice(&(self.default_group.len() as u16).to_be_bytes());
+        out.extend_from_slice(self.default_group.as_bytes());
         out.extend_from_slice(&(self.entries.len() as u32).to_be_bytes());
         for (alias, e) in &self.entries {
             out.extend_from_slice(&(alias.len() as u16).to_be_bytes());
             out.extend_from_slice(alias.as_bytes());
+            out.extend_from_slice(&(e.group.len() as u16).to_be_bytes());
+            out.extend_from_slice(e.group.as_bytes());
             out.extend_from_slice(&(e.secret.len() as u32).to_be_bytes());
             out.extend_from_slice(e.secret.as_slice());
             out.extend_from_slice(&e.created.to_be_bytes());
@@ -118,20 +250,41 @@ impl VaultData {
                 self.0 = b;
                 Ok(a)
             }
+            /// A length-prefixed group name, which must be valid.
+            fn group(&mut self) -> Result<String, VaultError> {
+                let len = u16::from_be_bytes(self.take(2)?.try_into().unwrap()) as usize;
+                std::str::from_utf8(self.take(len)?)
+                    .ok()
+                    .filter(|g| group::is_valid(g))
+                    .map(str::to_string)
+                    .ok_or_else(|| VaultError::Corrupt("invalid group name".into()))
+            }
         }
         let mut c = Cur(buf);
-        if c.take(MAGIC.len())? != MAGIC {
-            return Err(VaultError::Corrupt(
-                "bad magic / unsupported version".into(),
-            ));
+        let v2 = match c.take(MAGIC.len())? {
+            m if m == MAGIC => true,
+            m if m == MAGIC_V1 => false,
+            _ => {
+                return Err(VaultError::Corrupt(
+                    "bad magic / unsupported version".into(),
+                ))
+            }
+        };
+        let mut data = VaultData::new();
+        if v2 {
+            data.default_group = c.group()?;
         }
         let n = u32::from_be_bytes(c.take(4)?.try_into().unwrap());
-        let mut data = VaultData::new();
         for _ in 0..n {
             let alen = u16::from_be_bytes(c.take(2)?.try_into().unwrap()) as usize;
             let alias = std::str::from_utf8(c.take(alen)?)
                 .map_err(|_| VaultError::Corrupt("non-UTF-8 alias".into()))?
                 .to_string();
+            let group = if v2 {
+                c.group()?
+            } else {
+                group::DEFAULT.to_string()
+            };
             let slen = u32::from_be_bytes(c.take(4)?.try_into().unwrap()) as usize;
             let secret = SecretBuf::from_slice(c.take(slen)?);
             let created = u64::from_be_bytes(c.take(8)?.try_into().unwrap());
@@ -140,6 +293,7 @@ impl VaultData {
                 alias,
                 Entry {
                     secret,
+                    group,
                     created,
                     updated,
                 },
@@ -474,7 +628,12 @@ mod tests {
             // and the interesting panics are more likely to be past that
             // first gate (truncated/garbage length-prefixed fields).
             if rng.next_u64() % 2 == 0 && buf.len() >= MAGIC.len() {
-                buf[..MAGIC.len()].copy_from_slice(MAGIC);
+                let magic = if rng.next_u64() % 2 == 0 {
+                    MAGIC
+                } else {
+                    MAGIC_V1
+                };
+                buf[..MAGIC.len()].copy_from_slice(magic);
             }
             let _ = VaultData::decode(&buf);
         }
@@ -485,5 +644,177 @@ mod tests {
         fuzz_decode(b"");
         fuzz_decode(b"garbage");
         fuzz_decode(MAGIC);
+        fuzz_decode(MAGIC_V1);
+    }
+
+    /// A version-1 body (as written before groups existed) holding `entries`.
+    fn v1_body(entries: &[(&str, &[u8], u64, u64)]) -> Vec<u8> {
+        let mut out = MAGIC_V1.to_vec();
+        out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+        for (alias, secret, created, updated) in entries {
+            out.extend_from_slice(&(alias.len() as u16).to_be_bytes());
+            out.extend_from_slice(alias.as_bytes());
+            out.extend_from_slice(&(secret.len() as u32).to_be_bytes());
+            out.extend_from_slice(secret);
+            out.extend_from_slice(&created.to_be_bytes());
+            out.extend_from_slice(&updated.to_be_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn version_1_vault_decodes_into_default_group() {
+        let body = v1_body(&[("prod-db", b"s3cr3t!", 5, 6), ("other", b"x", 7, 8)]);
+        // Identical to the fuzz corpus file kept for the old format.
+        assert_eq!(
+            v1_body(&[("prod-db", b"s3cr3t!", 0x6553_f100, 0x6553_f100)]),
+            include_bytes!("../fuzz/corpus/vault_decode/valid_one_entry")
+        );
+        let d = VaultData::decode(&body).unwrap();
+        assert_eq!(d.default_group, "default");
+        assert_eq!(d.entries.len(), 2);
+        for e in d.entries.values() {
+            assert_eq!(e.group, "default");
+        }
+        assert_eq!(d.entries["prod-db"].secret.as_slice(), b"s3cr3t!");
+        assert_eq!(
+            (d.entries["prod-db"].created, d.entries["prod-db"].updated),
+            (5, 6)
+        );
+        // Saving always writes the new version.
+        let enc = d.encode();
+        assert!(enc.starts_with(MAGIC));
+        assert!(VaultData::decode(&v1_body(&[])).unwrap().entries.is_empty());
+    }
+
+    #[test]
+    fn version_2_round_trip_keeps_groups() {
+        let mut d = VaultData::new();
+        d.put("a", b"1");
+        d.set_default_group("work").unwrap();
+        d.put("b", b"2");
+        d.put_in("proddb", b"3", "prod");
+        d.entries.get_mut("proddb").unwrap().created = 9;
+        let enc = d.encode();
+        assert!(enc.starts_with(b"PWV2\n"));
+        let back = VaultData::decode(&enc).unwrap();
+        assert_eq!(back.default_group, "work");
+        let groups: Vec<(&str, &str)> = back
+            .entries
+            .iter()
+            .map(|(a, e)| (a.as_str(), e.group.as_str()))
+            .collect();
+        assert_eq!(
+            groups,
+            [("a", "default"), ("b", "work"), ("proddb", "prod")]
+        );
+        assert_eq!(back.entries["proddb"].secret.as_slice(), b"3");
+        assert_eq!(back.entries["proddb"].created, 9);
+        assert_eq!(
+            VaultData::decode(&VaultData::new().encode())
+                .unwrap()
+                .default_group,
+            "default"
+        );
+    }
+
+    #[test]
+    fn version_2_fuzz_corpus_matches_the_encoder() {
+        let mut d = VaultData::new();
+        d.put_in("proddb", b"s3cr3t!", "prod");
+        let e = d.entries.get_mut("proddb").unwrap();
+        (e.created, e.updated) = (0x6553_f100, 0x6553_f100);
+        assert_eq!(
+            &d.encode()[..],
+            include_bytes!("../fuzz/corpus/vault_decode/valid_v2_grouped_entry")
+        );
+        let mut d = VaultData::new();
+        d.set_default_group("work").unwrap();
+        assert_eq!(
+            &d.encode()[..],
+            include_bytes!("../fuzz/corpus/vault_decode/valid_v2_empty")
+        );
+    }
+
+    #[test]
+    fn decode_rejects_invalid_group_names() {
+        let mut d = VaultData::new();
+        d.put_in("a", b"1", "prod");
+        let good = d.encode().to_vec();
+        // The entry's group "prod" -> "pr/d", and the default group
+        // "default" -> "de\x1bault": both must be refused.
+        let pos = good.windows(4).position(|w| w == b"prod").unwrap();
+        let mut bad = good.clone();
+        bad[pos + 2] = b'/';
+        assert!(matches!(
+            VaultData::decode(&bad),
+            Err(VaultError::Corrupt(m)) if m.contains("group")
+        ));
+        let mut bad = good.clone();
+        bad[MAGIC.len() + 2 + 2] = 0x1b;
+        assert!(VaultData::decode(&bad).is_err());
+        // An empty default group name.
+        let mut bad = MAGIC.to_vec();
+        bad.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+        assert!(VaultData::decode(&bad).is_err());
+    }
+
+    #[test]
+    fn put_keeps_an_existing_alias_in_its_group() {
+        let mut d = VaultData::new();
+        d.put_in("a", b"1", "prod");
+        d.put("a", b"2");
+        assert_eq!(d.entries["a"].group, "prod");
+        d.put("b", b"x");
+        assert_eq!(d.entries["b"].group, "default");
+    }
+
+    #[test]
+    fn group_operations() {
+        let mut d = VaultData::new();
+        for a in ["a", "b", "c"] {
+            d.put(a, b"x");
+        }
+        assert_eq!(d.groups().into_iter().collect::<Vec<_>>(), [("default", 3)]);
+
+        // Moving: unknown alias changes nothing; groups are created implicitly.
+        let err = d
+            .move_to_group(&["a".into(), "nope".into()], "prod")
+            .unwrap_err();
+        assert!(err.contains("nope"), "{err}");
+        assert_eq!(d.entries["a"].group, "default");
+        assert!(d.move_to_group(&["a".into()], "bad/name").is_err());
+        let moved = d.move_to_group(&["a".into(), "b".into()], "prod").unwrap();
+        assert_eq!(moved, ["a", "b"]);
+        assert!(d.move_to_group(&["a".into()], "prod").unwrap().is_empty());
+        assert_eq!(
+            d.groups().into_iter().collect::<Vec<_>>(),
+            [("default", 1), ("prod", 2)]
+        );
+
+        // Renaming: never onto an existing group; the default follows.
+        assert!(d
+            .rename_group("prod", "default")
+            .unwrap_err()
+            .contains("already exists"));
+        assert!(d.rename_group("nope", "x").is_err());
+        assert_eq!(d.rename_group("prod", "production").unwrap(), 2);
+        assert_eq!(d.entries["a"].group, "production");
+        assert_eq!(d.rename_group("default", "personal").unwrap(), 1);
+        assert_eq!(d.default_group, "personal");
+        assert!(!d.has_group("default"));
+
+        // Removing: never the default; aliases go to the default group.
+        assert!(d.remove_group("personal").unwrap_err().contains("default"));
+        assert!(d.remove_group("nope").is_err());
+        assert_eq!(d.remove_group("production").unwrap(), ["a", "b"]);
+        assert_eq!(d.entries.len(), 3);
+        assert!(d.entries.values().all(|e| e.group == "personal"));
+
+        // The default group exists even while empty.
+        d.set_default_group("new").unwrap();
+        assert!(d.has_group("new"));
+        assert_eq!(d.groups()["new"], 0);
+        assert!(d.set_default_group("").is_err());
     }
 }

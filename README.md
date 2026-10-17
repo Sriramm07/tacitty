@@ -65,14 +65,19 @@ has been idle for 15 minutes.
 | Command | What it does |
 |---|---|
 | `tacitty init [--no-autostart]` | Create the vault, set the master passphrase, enable auto-start |
-| `tacitty add <alias>` | Store a secret (typed hidden, confirmed twice) |
+| `tacitty add <alias> [-g <group>]` | Store a secret (typed hidden, confirmed twice), optionally in a group |
 | `tacitty add <alias> --generate [--length N]` | Store a newly generated random secret |
 | `tacitty rm <alias>` | Remove an alias |
-| `tacitty mv <old> <new>` | Rename an alias |
-| `tacitty ls` | List aliases and dates (never secrets) |
+| `tacitty mv <old> <new>` | Rename an alias (it stays in its group) |
+| `tacitty ls [-g <group>]` | List aliases and dates by group (never secrets) |
+| `tacitty group ls` | List groups and how many aliases each holds |
+| `tacitty group move <alias> ... --to <group>` | Move aliases into a group |
+| `tacitty group rename <old> <new>` | Rename a group |
+| `tacitty group rm <group>` | Delete a group (its aliases move to the default group) |
+| `tacitty group default [<group>]` | Show or set the group new aliases go into |
 | `tacitty get <alias> [--force]` | Print a secret to stdout (refuses a terminal without `--force`) |
-| `tacitty export [<alias> ...] -o <file> [--to <key>] [--to-file <file>] [--armor]` | Write aliases to an encrypted file to share with a colleague (passphrase, or their age/SSH public keys) |
-| `tacitty import <file> [-i <identity>] [--overwrite]` | Add the aliases from an export file to your vault |
+| `tacitty export [<alias> ...] [-g <group>] -o <file> [--with-key <key or file>] [--armor]` | Write aliases to an encrypted file to share with colleagues (protected by a passphrase, or by their age/SSH public keys) |
+| `tacitty import <file> [-i <identity>] [-g <group>] [--overwrite]` | Add the aliases from an export file to your vault |
 | `tacitty shell [-- <cmd> ...]` | Run your shell (or `<cmd>`) inside taciTTY |
 | `tacitty enable` / `disable` | Turn auto-start on or off |
 | `tacitty lock` / `unlock` / `status` | Lock, unlock or check the vault |
@@ -81,7 +86,8 @@ has been idle for 15 minutes.
 | `tacitty config` | Print the config file path |
 
 Alias names: letters, digits, `.`, `_`, `/` and `-`, up to 64 characters,
-starting with a letter or digit.
+starting with a letter or digit. Group names follow the same rules,
+without `/`. `-g` / `--group` can be repeated for `export`.
 
 ## 🛠️ Configuration
 
@@ -133,6 +139,7 @@ The [taciTTY guide](docs/GUIDE.md) covers everything else:
 - [**Install**](docs/GUIDE.md#install): the installer, verifying downloads, updating
 - [**How it works**](docs/GUIDE.md#how-it-works): how password prompts are detected, locally and over SSH
 - [**Auto-start**](docs/GUIDE.md#auto-start): what `tacitty init` changes, and how to switch it off
+- [**Groups**](docs/GUIDE.md#groups): organising aliases (for example a `prod` group) for listing and sharing
 - [**Sharing aliases securely**](docs/GUIDE.md#sharing): giving colleagues the same aliases with `tacitty export` / `import`
 - [**Security**](docs/GUIDE.md#security): threat model, protections and known limitations
 - [**Development**](docs/GUIDE.md#development): building, testing and releasing

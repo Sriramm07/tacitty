@@ -17,7 +17,8 @@ input:
   attacker got to write directly (see the threat model in the top-level
   README: an on-disk vault an attacker can overwrite bypasses the passphrase
   entirely, but it still must not crash the process it eventually gets
-  parsed by).
+  parsed by). The corpus has samples of both layouts the decoder reads:
+  the current one with groups (`PWV2`) and the original one (`PWV1`).
 
 ## These need nightly + cargo-fuzz, which stable `cargo test` can't verify
 

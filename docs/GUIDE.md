@@ -5,6 +5,7 @@
 - [Install](#install)
 - [How it works](#how-it-works)
 - [Auto-start](#auto-start)
+- [Groups](#groups)
 - [Sharing aliases securely](#sharing)
 - [Security](#security)
 - [Development](#development)
@@ -153,6 +154,66 @@ lock you out.
 > **For tmux**, wrap each *pane* rather than the tmux client: see
 > [`contrib/tacitty.tmux.conf`](../contrib/tacitty.tmux.conf).
 
+<a id="groups"></a>
+
+## 🗂️ Groups
+
+Groups let you organise aliases, for example keeping production passwords
+together in a `prod` group, so you can list them together and share them
+in one go. Every alias is in exactly one group. Alias names stay unique
+across the whole vault, so you still just type `@proddb` at a prompt,
+whichever group it's in. Groups never change how an alias is used.
+
+Every vault starts with a group called `default`, which is also the
+**default group**: the one new aliases go into when you don't name a group.
+Aliases saved before groups existed are all in `default`.
+
+```sh
+tacitty add proddb --group prod             # save straight into a group
+tacitty group move rootpw pgadmin --to prod # move existing aliases (the group is created if needed)
+tacitty ls                                  # every alias, by group
+tacitty ls -g prod                          # just one group
+```
+
+`tacitty ls` lists each group, marking the default, with its aliases and
+their dates (never secrets):
+
+```console
+$ tacitty ls
+default (default)
+  @home                             created 2026-01-12 09:30:02 UTC  updated 2026-01-12 09:30:02 UTC
+
+prod
+  @pgadmin                          created 2026-02-03 14:11:47 UTC  updated 2026-02-03 14:11:47 UTC
+  @proddb                           created 2026-01-12 09:31:15 UTC  updated 2026-03-01 08:02:40 UTC
+```
+
+| To... | Run |
+|---|---|
+| List groups and their sizes | `tacitty group ls` |
+| Move aliases into a group | `tacitty group move <alias> ... --to <group>` |
+| Rename a group | `tacitty group rename <old> <new>` |
+| Delete a group | `tacitty group rm <group>` |
+| See or change the default group | `tacitty group default [<group>]` |
+
+- **Renaming** a group onto a name that's already in use is refused rather
+  than merging the two; use `group move` to move aliases into an existing
+  group. Renaming the default group keeps it the default.
+- **Deleting** a group never deletes secrets: its aliases move into the
+  default group. The default group itself can't be deleted; make another
+  group the default first.
+- A group exists while it holds aliases (or is the default group), so
+  moving the last alias out of a group removes it.
+- `tacitty add` on an alias that already exists keeps it in its group,
+  unless you pass `--group`. `tacitty mv` keeps the renamed alias in its
+  group.
+- Group names: letters, digits, `.`, `_` and `-`, up to 64 characters,
+  starting with a letter or digit.
+
+Like the other commands that change the vault, the group commands ask for
+your master passphrase and then lock the running agent, so it picks up the
+change the next time it's unlocked.
+
 <a id="sharing"></a>
 
 ## 🤝 Sharing aliases securely
@@ -163,26 +224,32 @@ account is involved: you move the file however you like (`scp`, chat,
 email, a USB stick), and only someone with the right key or passphrase can
 open it.
 
+**Choosing what to share.** Name aliases, groups (`-g` / `--group`,
+repeatable), or both; with neither, every alias is exported. The file
+records which group each alias is in.
+
 **To specific people (public keys).** Encrypt to your colleagues' SSH
 public keys (`ssh-ed25519`, or `ssh-rsa` of at least 2048 bits) or
-[age](https://age-encryption.org) keys (`age1...`). Only the matching
-private keys can open the file:
+[age](https://age-encryption.org) keys (`age1...`) with `--with-key`. Give
+it once per person (or per key file). It produces **one file** that each
+listed person can open with their own private key, and nobody else can:
 
 ```sh
-# Alice's key file can be her ~/.ssh/id_ed25519.pub, or https://github.com/alice.keys
-tacitty export proddb rootpw --to-file alice.pub -o prod.tacitty
+# alice.pub can be her ~/.ssh/id_ed25519.pub, or a copy of https://github.com/alice.keys
+tacitty export --group prod --with-key alice.pub --with-key bob.pub -o prod.tacitty
 
-# Keys can also be given directly (quote SSH keys, they contain spaces)
-tacitty export proddb --to "ssh-ed25519 AAAAC3Nza... alice@laptop" --to age1qyqs... -o prod.tacitty
+# A key can also be given directly (quote SSH keys, they contain spaces)
+tacitty export proddb --with-key "ssh-ed25519 AAAAC3Nza... alice@laptop" --with-key age1qyqs... -o proddb.tacitty
 ```
 
-`--to` and `--to-file` can be repeated. A key file has one key per line;
-blank lines and `#` comments are skipped, and any other line that isn't a
-supported key stops the export with an error, so nobody is left out by
-accident.
+A `--with-key` value that starts with `age1`, `ssh-ed25519 ` or `ssh-rsa `
+is used as a key; anything else is read as a key file. A key file has one
+key per line; blank lines and `#` comments are skipped, and any other line
+that isn't a supported key stops the export with an error, so nobody is
+left out by accident.
 
-**With a passphrase.** Without `--to`/`--to-file`, taciTTY asks for an
-export passphrase (twice, at least 12 characters):
+**With a passphrase.** Without `--with-key`, taciTTY asks for an export
+passphrase (twice, at least 12 characters):
 
 ```sh
 tacitty export -o team.tacitty --armor      # every alias, as pasteable text
@@ -191,29 +258,33 @@ tacitty export -o team.tacitty --armor      # every alias, as pasteable text
 `--armor` writes ASCII text (`-----BEGIN AGE ENCRYPTED FILE-----`) instead
 of binary, for pasting into a chat or email. Either way, export asks for
 your master passphrase first, writes the file with mode `0600`, and won't
-overwrite an existing file unless you pass `--force`. With no alias names,
-every alias is exported.
+overwrite an existing file unless you pass `--force`.
 
 **Importing.** Your colleague runs:
 
 ```sh
 tacitty import prod.tacitty                 # uses ~/.ssh/id_ed25519 or ~/.ssh/id_rsa
 tacitty import prod.tacitty -i ~/.config/age/key.txt
+tacitty import prod.tacitty --group shared  # put everything in one group
 ```
 
 taciTTY works out from the file whether it needs a passphrase or a private
 key. `-i` takes an age identity file or an SSH private key (it asks for the
 key's passphrase if it has one) and can be repeated. Then it asks for the
-importer's own master passphrase and adds the aliases to their vault.
+importer's own master passphrase and adds the aliases to their vault, each
+in the same group it was in for the sender (aliases the file doesn't put
+in a group go into the importer's default group), and reports which group
+got which aliases. `--group` puts them all into one group instead.
 Aliases they already have are skipped and listed, unless they pass
-`--overwrite`. Entries that can't be used (an invalid alias name, a
-password with control characters) are skipped with a reason; secrets are
-never printed.
+`--overwrite` (a replaced alias moves to the imported alias's group).
+Entries that can't be used (an invalid alias name, a password with control
+characters) are skipped with a reason; secrets are never printed.
 
 **What's in the file.** A standard [age](https://age-encryption.org/v1)
 file whose content is a FIDO Alliance Credential Exchange Format (CXF)
 v1.0 JSON document, with each alias as an item titled with the alias name
-and holding its password. So the file can also be opened with
+and holding its password, and each group as a CXF collection titled with
+the group name. So the file can also be opened with
 the standard tools, for example `age -d -i ~/.ssh/id_ed25519 prod.tacitty`
 or `age -d team.tacitty` for a passphrase file. That prints the secrets in
 plain text, so only do it when you mean to.

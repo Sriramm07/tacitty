@@ -170,7 +170,16 @@ pub fn init_vault(env: &Env, passphrase: &str) {
 }
 
 pub fn add_alias(env: &Env, alias: &str, secret: &str, passphrase: &str) {
-    let mut p = env.spawn(&["add", alias], 10_000);
+    add_with_args(env, &["add", alias], secret, passphrase);
+}
+
+/// `tacitty add <alias> --group <group>`.
+pub fn add_alias_in(env: &Env, alias: &str, group: &str, secret: &str, passphrase: &str) {
+    add_with_args(env, &["add", alias, "--group", group], secret, passphrase);
+}
+
+fn add_with_args(env: &Env, args: &[&str], secret: &str, passphrase: &str) {
+    let mut p = env.spawn(args, 10_000);
     p.exp_string("Secret:").unwrap();
     p.send_line(secret).unwrap();
     p.exp_string("Confirm secret:").unwrap();

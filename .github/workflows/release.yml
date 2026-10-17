@@ -36,6 +36,16 @@ jobs:
             echo "tag v$tag does not match Cargo.toml version $ver" >&2
             exit 1
           fi
+      # No release is built from a dependency tree with a known advisory, a
+      # disallowed licence, a banned crate or an unknown source.
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-audit
+      - run: cargo audit
 
   build:
     name: build (${{ matrix.target }})

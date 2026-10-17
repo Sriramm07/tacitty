@@ -355,7 +355,8 @@ prevented); someone who can overwrite the vault or config files.
 - The agent's socket checks each caller's user ID and rejects everyone
   else. Like `ssh-agent`, other programs running as *you* can query it
   while the vault is unlocked.
-- The dependency tree is checked with `cargo audit` and `cargo deny`. `openssl` is
+- Every release is built only after the dependency tree passes `cargo audit`
+  and `cargo deny` (known advisories, licences, banned crates, sources). `openssl` is
   banned from the dependency tree; all cryptography is pure Rust (`age`,
   `chacha20poly1305`, `scrypt`).
 - Releases are built by GitHub Actions with read-only permissions, every

@@ -38,9 +38,11 @@ use crate::sys;
 const MAGIC_V1: &[u8] = b"PWV1\n";
 const MAGIC: &[u8] = b"PWV2\n";
 const MAX_PLAINTEXT: usize = 16 * 1024 * 1024;
-/// Longest secret we accept (keeps the worst-case quoted payload well below
-/// the kernel's 4096-byte canonical line limit).
-pub const MAX_SECRET_LEN: usize = 1024;
+/// Longest secret we accept. A secret is delivered as one line of
+/// canonical-mode input (plus Enter), and the terminal's line buffer is
+/// 4096 bytes on Linux but only 1024 (`MAX_CANON`) on macOS, so this stays
+/// safely below the smaller one: a longer line would be cut off or rejected.
+pub const MAX_SECRET_LEN: usize = 1000;
 
 #[derive(Debug, Error)]
 pub enum VaultError {

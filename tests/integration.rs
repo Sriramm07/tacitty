@@ -1069,3 +1069,20 @@ fn mv_refuses_to_overwrite_an_existing_alias() {
     assert_eq!(stored_secret(&env, "first"), "secret-one");
     assert_eq!(stored_secret(&env, "second"), "secret-two");
 }
+
+/// The longest allowed secret must arrive whole at a real password prompt,
+/// on every platform (macOS's terminal line buffer is only 1024 bytes).
+#[test]
+fn longest_allowed_secret_is_delivered_whole() {
+    let secret: String = "Abc123-_.".chars().cycle().take(1000).collect();
+    let env = setup_with_alias("long", &secret);
+    let mut p = env.spawn_shell(30_000);
+    p.send_line("bash -c 'read -s -p \"Password: \" pw; echo; echo LEN[${#pw}]'")
+        .unwrap();
+    p.exp_string("Password: ").unwrap();
+    p.send("@long\r").unwrap();
+    p.flush().unwrap();
+    p.exp_string("LEN[1000]").unwrap();
+    p.send_line("exit").unwrap();
+    p.exp_eof().unwrap();
+}

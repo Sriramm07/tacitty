@@ -26,9 +26,8 @@ The three targets above type-check on stable (`cd fuzz && cargo check`
 passes), but actually *running* them needs a nightly toolchain and
 `cargo-fuzz`'s libFuzzer/sanitizer instrumentation — there's no way to
 confirm from a plain `cargo test` run that they've ever found anything.
-`.github/workflows/ci.yml` runs a short timed pass of all three on every
-push specifically so that gets verified continuously rather than taking it
-on faith.
+Run a short timed pass of all three (see below) after changing any of the
+fuzzed modules, rather than taking them on faith.
 
 As a stable-Rust complement — not a replacement, since it has no coverage
 feedback and so can't discover the deep, rare inputs a real fuzzer would —
@@ -53,8 +52,7 @@ cargo +nightly fuzz run vault_decode
 
 Add `-- -max_total_time=300` (or similar) to bound a run. `cargo +nightly fuzz
 run <target> -- -runs=100000` is a reasonable quick regression check to run
-locally after touching the relevant module; the CI workflow runs a short
-timed pass on every push (see `.github/workflows/ci.yml`).
+locally after touching the relevant module.
 
 Crashes are saved under `fuzz/artifacts/<target>/`; reproduce one with:
 

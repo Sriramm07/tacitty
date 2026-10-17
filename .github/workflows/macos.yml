@@ -1,26 +1,36 @@
 name: macOS tests
 
-# Run by hand (Actions tab -> "macOS tests" -> Run workflow) to check the
-# macOS port on real Macs: GitHub's Apple Silicon and Intel runners. It
-# builds, runs the unit tests and the pty integration tests, and runs
-# `tacitty doctor`. Nothing here can write to the repository.
+# Checks the macOS port on real Macs: GitHub's Apple Silicon and Intel
+# runners. It builds, runs the unit tests and the pty integration tests,
+# and runs `tacitty doctor`.
+#
+# Triggers: run it by hand (Actions tab -> "macOS tests" -> Run workflow),
+# or push a commit to the `ci/macos` branch. Either way the results (a
+# PASS/FAIL summary plus full logs per runner) are also committed to the
+# `ci/macos-results` branch, so they can be read with plain git
+# (`git fetch origin ci/macos-results`) without signing in to GitHub. Only
+# that last `report` job can write to the repository, and only to that
+# branch; it never runs project code.
 #
 # Runner labels: `macos-15` is Apple Silicon, `macos-15-intel` is the
 # Intel image (`macos-13`, the old Intel label, has been retired).
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ci/macos]
 
-permissions:
-  contents: read
+permissions: {}
 
 env:
-  CARGO_TERM_COLOR: always
+  CARGO_TERM_COLOR: never
 
 jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -31,15 +41,64 @@ jobs:
         with:
           toolchain: stable
 
-      - name: build
-        run: cargo build --locked
+      # Every step runs even if an earlier one fails, so one run reports
+      # everything; the job still fails at the end if anything did.
+      - name: build and test
+        shell: bash
+        run: |
+          mkdir -p results
+          { sw_vers; uname -m; } > results/os.txt 2>&1 || true
+          status=0
+          check() {
+            name="$1"; shift
+            if "$@" > "results/$name.log" 2>&1; then
+              echo "PASS $name" >> results/summary.txt
+            else
+              echo "FAIL $name (exit $?)" >> results/summary.txt
+              status=1
+            fi
+          }
+          check build cargo build --locked
+          check unit-tests cargo test --locked --lib
+          # One at a time, as in docs/GUIDE.md: each test starts its own agent.
+          check integration-tests cargo test --locked --features test-hooks --test integration -- --test-threads=1
+          check doctor ./target/debug/tacitty doctor
+          cat results/summary.txt
+          exit $status
 
-      - name: unit tests
-        run: cargo test --locked --lib
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: results-${{ matrix.os }}
+          path: results
 
-      # One at a time, as in docs/GUIDE.md: each test starts its own agent.
-      - name: integration tests
-        run: cargo test --locked --features test-hooks --test integration -- --test-threads=1
-
-      - name: doctor
-        run: ./target/debug/tacitty doctor
+  report:
+    name: publish results to ci/macos-results
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: results-*
+          path: out
+      - name: commit results
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          cd out
+          {
+            echo "commit: $GITHUB_SHA"
+            echo "run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "overall: $TEST_RESULT"
+          } > RESULT.txt
+          git init -q
+          git checkout -q -b results
+          git add -A
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "macOS test results for $GITHUB_SHA"
+          git push -q -f "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/ci/macos-results

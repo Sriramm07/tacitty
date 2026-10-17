@@ -167,8 +167,13 @@ fn classify_line(
             return LineMode::Local;
         }
         if just_settled {
-            const RETRIES: u32 = 8;
-            const DELAY: Duration = Duration::from_millis(1);
+            // Up to ~50 ms: long enough for a slow or busy machine (seen on
+            // macOS CI) to finish switching echo off after printing the
+            // prompt. This only runs when the trigger is typed at the very
+            // start of a line right after new output, never for ordinary
+            // typing.
+            const RETRIES: u32 = 25;
+            const DELAY: Duration = Duration::from_millis(2);
             for _ in 0..RETRIES {
                 std::thread::sleep(DELAY);
                 if detect::read_secret_mode(master_fd) {
@@ -296,6 +301,13 @@ pub fn run(cfg: Config, options: RunOptions) -> anyhow::Result<i32> {
         ],
         sig_w.as_raw_fd(),
     )?;
+    // A resize between reading the size above and installing the SIGWINCH
+    // handler would have been lost (the default action ignores it), leaving
+    // the pty at a stale size. Now that later resizes are caught, apply the
+    // current size once.
+    if let Ok(ws) = sys::get_winsize(0) {
+        let _ = sys::set_winsize(master_fd, &ws);
+    }
 
     let term_guard = TermGuard::new(0)?;
     sys::harden_process();

@@ -392,6 +392,15 @@ pub fn run(sock_path: &Path, cfg: &Config) -> Result<(), AgentError> {
         }
         match listener.accept() {
             Ok((stream, _)) => {
+                // On macOS (and the BSDs) an accepted socket inherits the
+                // listener's non-blocking mode; Linux's doesn't. Each
+                // connection is served on its own thread with a read
+                // timeout, so it must block: otherwise the first read finds
+                // nothing yet (e.g. while the user is still typing the
+                // passphrase) and the connection is dropped.
+                if stream.set_nonblocking(false).is_err() {
+                    continue;
+                }
                 let st = Arc::clone(&state);
                 std::thread::spawn(move || {
                     if let Err(_e) = handle_conn(stream, st) {

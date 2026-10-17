@@ -10,6 +10,7 @@ pub mod backend;
 pub mod config;
 pub mod detect;
 pub mod export;
+pub mod group;
 pub mod logging;
 pub mod remote;
 pub mod resolver;

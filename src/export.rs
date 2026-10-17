@@ -7,11 +7,18 @@
 //! ```text
 //! { "version": {"major":1,"minor":0}, "exporterRpId": "tacitty",
 //!   "exporterDisplayName": "taciTTY", "timestamp": <unix secs>,
-//!   "accounts": [ { "id", "username": "", "email": "", "collections": [],
+//!   "accounts": [ { "id", "username": "", "email": "",
+//!     "collections": [ { "id", "title": "<group>", "items": [ { "item": "<item id>" } ] } ],
 //!     "items": [ { "id", "creationAt", "modifiedAt", "title": "<alias>",
 //!       "credentials": [ { "type": "basic-auth", "password":
 //!         { "fieldType": "concealed-string", "value": "<secret>" } } ] } ] } ] }
 //! ```
+//!
+//! Groups travel as CXF collections: one per exported group, titled with
+//! the group name and linking (by item id) to the aliases in it. On import
+//! an item goes into the group named by the first collection that links to
+//! it, if that title is a valid group name, unless the importer picks a
+//! group with `--group`.
 //!
 //! It is encrypted either with a passphrase (age scrypt) or to one or more
 //! public keys (age X25519 `age1...`, `ssh-ed25519`, `ssh-rsa`), optionally
@@ -27,6 +34,7 @@
 //! never wiped. The structs are flat for the reason given on
 //! `agent::Request`.
 
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -43,6 +51,7 @@ use thiserror::Error;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::alias;
+use crate::group;
 use crate::secret::SecretBuf;
 use crate::sys;
 use crate::vault::{self, VaultData};
@@ -84,6 +93,7 @@ pub enum ExportError {
 /// own buffer until it is serialized.
 pub struct ExportEntry<'a> {
     pub alias: &'a str,
+    pub group: &'a str,
     pub secret: &'a [u8],
     pub created: u64,
     pub updated: u64,
@@ -111,8 +121,22 @@ struct AccountOut<'a> {
     id: String,
     username: &'static str,
     email: &'static str,
-    collections: [(); 0],
+    collections: Vec<CollectionOut<'a>>,
     items: Vec<ItemOut<'a>>,
+}
+
+/// A CXF Collection: one per exported group.
+#[derive(Serialize)]
+struct CollectionOut<'a> {
+    id: String,
+    title: &'a str,
+    items: Vec<LinkedItemOut>,
+}
+
+/// A CXF LinkedItem: the `id` of an item in the same account.
+#[derive(Serialize)]
+struct LinkedItemOut {
+    item: String,
 }
 
 #[derive(Serialize)]
@@ -152,6 +176,7 @@ fn random_id() -> Result<String, ExportError> {
 /// strings can't carry arbitrary bytes.
 pub fn encode_cxf(entries: &[ExportEntry<'_>], timestamp: u64) -> Result<SecretBuf, ExportError> {
     let mut items = Vec::with_capacity(entries.len());
+    let mut groups: BTreeMap<&str, Vec<LinkedItemOut>> = BTreeMap::new();
     for e in entries {
         let value = std::str::from_utf8(e.secret).map_err(|_| {
             ExportError::Invalid(format!(
@@ -160,8 +185,13 @@ pub fn encode_cxf(entries: &[ExportEntry<'_>], timestamp: u64) -> Result<SecretB
                 e.alias
             ))
         })?;
+        let id = random_id()?;
+        groups
+            .entry(e.group)
+            .or_default()
+            .push(LinkedItemOut { item: id.clone() });
         items.push(ItemOut {
-            id: random_id()?,
+            id,
             creation_at: e.created,
             modified_at: e.updated,
             title: e.alias,
@@ -174,6 +204,14 @@ pub fn encode_cxf(entries: &[ExportEntry<'_>], timestamp: u64) -> Result<SecretB
             }],
         });
     }
+    let mut collections = Vec::with_capacity(groups.len());
+    for (title, items) in groups {
+        collections.push(CollectionOut {
+            id: random_id()?,
+            title,
+            items,
+        });
+    }
     let header = HeaderOut {
         version: Version { major: 1, minor: 0 },
         exporter_rp_id: EXPORTER_RP_ID,
@@ -183,14 +221,14 @@ pub fn encode_cxf(entries: &[ExportEntry<'_>], timestamp: u64) -> Result<SecretB
             id: random_id()?,
             username: "",
             email: "",
-            collections: [],
+            collections,
             items,
         }],
     };
     let mut out = SecretBuf::with_capacity(
         512 + entries
             .iter()
-            .map(|e| 256 + e.alias.len() + 2 * e.secret.len())
+            .map(|e| 384 + e.alias.len() + e.group.len() + 2 * e.secret.len())
             .sum::<usize>(),
     );
     serde_json::to_writer(&mut out, &header)
@@ -211,12 +249,39 @@ struct HeaderIn<'a> {
 
 #[derive(Deserialize)]
 struct AccountIn<'a> {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    collections: Vec<CollectionIn>,
     #[serde(default, borrow)]
     items: Vec<ItemIn<'a>>,
 }
 
+/// A CXF Collection. Nesting depth is bounded by serde_json's recursion
+/// limit.
+#[derive(Deserialize)]
+struct CollectionIn {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    items: Vec<LinkedItemIn>,
+    #[serde(default, rename = "subCollections")]
+    sub_collections: Vec<CollectionIn>,
+}
+
+#[derive(Deserialize)]
+struct LinkedItemIn {
+    #[serde(default)]
+    item: String,
+    /// The owning account's id; absent means the collection's own account.
+    #[serde(default)]
+    account: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct ItemIn<'a> {
+    #[serde(default)]
+    id: String,
     #[serde(default)]
     title: String,
     #[serde(default, borrow)]
@@ -244,6 +309,9 @@ struct FieldIn<'a> {
 pub struct ImportedItem {
     pub alias: String,
     pub secret: SecretBuf,
+    /// The group named by the first collection that links to this item,
+    /// if there is one and its title is a valid group name.
+    pub collection: Option<String>,
 }
 
 /// An item that was not imported. `title` is already safe to print.
@@ -256,6 +324,26 @@ pub struct Skipped {
 pub struct Decoded {
     pub items: Vec<ImportedItem>,
     pub skipped: Vec<Skipped>,
+    /// Titles (safe to print) of collections holding imported items that
+    /// aren't valid group names; those items get no `collection`.
+    pub bad_collections: Vec<String>,
+}
+
+/// Map each `(account id, item id)` to the title of the first collection
+/// (depth first, in file order) that links to it.
+fn index_collections<'h>(
+    account: &'h str,
+    collections: &'h [CollectionIn],
+    out: &mut HashMap<(&'h str, &'h str), &'h str>,
+) {
+    for c in collections {
+        for link in &c.items {
+            let owner = link.account.as_deref().unwrap_or(account);
+            out.entry((owner, link.item.as_str()))
+                .or_insert(c.title.as_str());
+        }
+        index_collections(account, &c.sub_collections, out);
+    }
 }
 
 /// Make an untrusted title safe to print on a terminal: printable ASCII is
@@ -384,8 +472,17 @@ pub fn decode_cxf(plain: &[u8]) -> Result<Decoded, ExportError> {
     let mut out = Decoded {
         items: Vec::new(),
         skipped: Vec::new(),
+        bad_collections: Vec::new(),
     };
-    for item in header.accounts.iter().flat_map(|a| a.items.iter()) {
+    let mut in_collection = HashMap::new();
+    for a in &header.accounts {
+        index_collections(&a.id, &a.collections, &mut in_collection);
+    }
+    let items = header
+        .accounts
+        .iter()
+        .flat_map(|a| a.items.iter().map(move |i| (a.id.as_str(), i)));
+    for (account, item) in items {
         let title = display_title(&item.title);
         let mut skip = |reason: String| {
             out.skipped.push(Skipped {
@@ -431,28 +528,53 @@ pub fn decode_cxf(plain: &[u8]) -> Result<Decoded, ExportError> {
             skip("appears more than once in the file (kept the first)".into());
             continue;
         }
+        let collection = match in_collection.get(&(account, item.id.as_str())) {
+            Some(c) if group::is_valid(c) => Some(c.to_string()),
+            Some(c) => {
+                let shown = display_title(c);
+                if !out.bad_collections.contains(&shown) {
+                    out.bad_collections.push(shown);
+                }
+                None
+            }
+            None => None,
+        };
         out.items.push(ImportedItem {
             alias: item.title.clone(),
             secret,
+            collection,
         });
     }
     Ok(out)
 }
 
+/// One alias written by [`merge_into`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Imported {
+    pub alias: String,
+    pub group: String,
+    /// It already existed and was replaced (`--overwrite`).
+    pub replaced: bool,
+}
+
 /// What [`merge_into`] did.
 #[derive(Debug, Default)]
 pub struct ImportReport {
-    /// Aliases that are new in the vault.
-    pub added: Vec<String>,
-    /// Aliases that already existed and were replaced (`--overwrite`).
-    pub replaced: Vec<String>,
+    pub imported: Vec<Imported>,
     pub skipped: Vec<Skipped>,
 }
 
-/// Add decoded items to `data`. Existing aliases are left alone (and
+/// Add decoded items to `data`. Each goes into `group` if given, else the
+/// group its collection names, else the vault's default group; a replaced
+/// alias moves to that group too. Existing aliases are left alone (and
 /// reported) unless `overwrite`. Timestamps are those of the import: the
-/// file's are only informational.
-pub fn merge_into(data: &mut VaultData, decoded: Decoded, overwrite: bool) -> ImportReport {
+/// file's are only informational. `group` must already be validated.
+pub fn merge_into(
+    data: &mut VaultData,
+    decoded: Decoded,
+    overwrite: bool,
+    group: Option<&str>,
+) -> ImportReport {
     let mut report = ImportReport {
         skipped: decoded.skipped,
         ..Default::default()
@@ -466,12 +588,16 @@ pub fn merge_into(data: &mut VaultData, decoded: Decoded, overwrite: bool) -> Im
             });
             continue;
         }
-        data.put(&item.alias, item.secret.as_slice());
-        if exists {
-            report.replaced.push(item.alias);
-        } else {
-            report.added.push(item.alias);
-        }
+        let target = group
+            .or(item.collection.as_deref())
+            .unwrap_or(&data.default_group)
+            .to_string();
+        data.put_in(&item.alias, item.secret.as_slice(), &target);
+        report.imported.push(Imported {
+            alias: item.alias,
+            group: target,
+            replaced: exists,
+        });
     }
     report
 }
@@ -496,6 +622,9 @@ fn short_key(s: &str) -> String {
 /// public key in authorized_keys form (`ssh-ed25519 AAAA... [comment]`,
 /// `ssh-rsa ...` of at least 2048 bits).
 pub fn parse_recipient(s: &str) -> Result<BoxedRecipient, String> {
+    if looks_private(s) {
+        return Err(PRIVATE_KEY_GIVEN.into());
+    }
     let mut words = s.split_whitespace();
     let Some(first) = words.next() else {
         return Err("empty key".into());
@@ -540,6 +669,46 @@ pub fn parse_recipient(s: &str) -> Result<BoxedRecipient, String> {
         Err(E::RsaModulusTooLarge) => Err("ssh-rsa key is larger than supported".into()),
         Err(_) => Err(not_a_key()),
     }
+}
+
+const PRIVATE_KEY_GIVEN: &str = "this is a private key, not a public key (give the \
+     public one: age1... or the contents of a .pub file)";
+
+/// Does this look like private key material? Such text is never repeated
+/// back in an error message, not even shortened.
+fn looks_private(s: &str) -> bool {
+    let s = s.trim_start();
+    s.get(..15)
+        .is_some_and(|p| p.eq_ignore_ascii_case("AGE-SECRET-KEY-"))
+        || s.contains("PRIVATE KEY")
+}
+
+/// Resolve one `--with-key` value. Text starting with `age1`,
+/// `ssh-ed25519 ` or `ssh-rsa ` is a public key; anything else is the path
+/// of a key file (see [`parse_recipients`]).
+pub fn recipients_from_arg(value: &str) -> Result<Vec<BoxedRecipient>, String> {
+    let v = value.trim();
+    if ["age1", "ssh-ed25519 ", "ssh-rsa "]
+        .iter()
+        .any(|p| v.starts_with(p))
+    {
+        return parse_recipient(v).map(|r| vec![r]);
+    }
+    let path = Path::new(value);
+    if fs::symlink_metadata(path).is_ok() {
+        return read_recipients_file(path);
+    }
+    if looks_private(v) {
+        return Err(PRIVATE_KEY_GIVEN.into());
+    }
+    // Another kind of key (ecdsa, ...): let the parser say why it can't be used.
+    if v.contains(char::is_whitespace) && (v.starts_with("ssh-") || v.starts_with("ecdsa-")) {
+        return parse_recipient(v).map(|r| vec![r]);
+    }
+    Err(format!(
+        "`{}` is not a public key (age1..., ssh-ed25519 or ssh-rsa) or an existing key file",
+        display_title(value)
+    ))
 }
 
 /// Parse a recipients file (authorized_keys / GitHub `.keys` style): one
@@ -935,6 +1104,7 @@ mod tests {
         list.iter()
             .map(|(alias, secret)| ExportEntry {
                 alias,
+                group: "default",
                 secret,
                 created: 100,
                 updated: 200,
@@ -971,8 +1141,12 @@ mod tests {
         assert_eq!(v["timestamp"], 1_700_000_000u64);
         let acct = &v["accounts"][0];
         assert_eq!(acct["username"], "");
-        assert_eq!(acct["collections"], serde_json::json!([]));
         let item = &acct["items"][0];
+        let colls = acct["collections"].as_array().unwrap();
+        assert_eq!(colls.len(), 1);
+        assert_eq!(colls[0]["title"], "default");
+        assert_eq!(colls[0]["items"].as_array().unwrap().len(), 3);
+        assert_eq!(colls[0]["items"][0]["item"], item["id"]);
         assert_eq!(item["title"], "proddb");
         assert_eq!(item["creationAt"], 100);
         assert_eq!(item["modifiedAt"], 200);
@@ -1361,16 +1535,200 @@ mod tests {
         };
         let mut data = VaultData::new();
         data.put("a", b"old-a");
-        let r = merge_into(&mut data, decode(), false);
-        assert_eq!(r.added, ["b"]);
-        assert!(r.replaced.is_empty());
+        let r = merge_into(&mut data, decode(), false, None);
+        assert_eq!(r.imported.len(), 1);
+        assert_eq!(r.imported[0].alias, "b");
+        assert!(!r.imported[0].replaced);
         assert_eq!(r.skipped.len(), 1);
         assert!(r.skipped[0].reason.contains("--overwrite"));
         assert_eq!(data.entries["a"].secret.as_slice(), b"old-a");
 
-        let r = merge_into(&mut data, decode(), true);
-        assert_eq!(r.replaced, ["a", "b"]);
+        let r = merge_into(&mut data, decode(), true, None);
+        let replaced: Vec<&str> = r
+            .imported
+            .iter()
+            .filter(|i| i.replaced)
+            .map(|i| i.alias.as_str())
+            .collect();
+        assert_eq!(replaced, ["a", "b"]);
         assert_eq!(data.entries["a"].secret.as_slice(), b"new-a");
+    }
+
+    fn grouped(list: &[(&'static str, &'static str)]) -> SecretBuf {
+        let entries: Vec<ExportEntry<'_>> = list
+            .iter()
+            .map(|&(alias, group)| ExportEntry {
+                alias,
+                group,
+                secret: b"pw",
+                created: 1,
+                updated: 2,
+            })
+            .collect();
+        encode_cxf(&entries, 0).unwrap()
+    }
+
+    fn groups_of(data: &VaultData) -> Vec<(&str, &str)> {
+        data.entries
+            .iter()
+            .map(|(a, e)| (a.as_str(), e.group.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn collections_carry_groups_through_a_round_trip() {
+        let plain = grouped(&[("proddb", "prod"), ("rootpw", "prod"), ("home", "personal")]);
+        let v: serde_json::Value = serde_json::from_slice(&plain).unwrap();
+        let acct = &v["accounts"][0];
+        let colls = acct["collections"].as_array().unwrap();
+        let titles: Vec<&str> = colls.iter().map(|c| c["title"].as_str().unwrap()).collect();
+        assert_eq!(titles, ["personal", "prod"]);
+        for c in colls {
+            assert!(c["id"].as_str().is_some_and(|id| !id.is_empty()));
+        }
+        let prod: Vec<&serde_json::Value> = colls[1]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| &l["item"])
+            .collect();
+        assert_eq!(prod, [&acct["items"][0]["id"], &acct["items"][1]["id"]]);
+
+        let d = decode_cxf(&plain).unwrap();
+        assert!(d.bad_collections.is_empty());
+        let mut data = VaultData::new();
+        data.set_default_group("mine").unwrap();
+        let r = merge_into(&mut data, d, false, None);
+        assert_eq!(r.imported.len(), 3);
+        assert_eq!(
+            groups_of(&data),
+            [("home", "personal"), ("proddb", "prod"), ("rootpw", "prod")]
+        );
+    }
+
+    #[test]
+    fn group_override_puts_everything_in_one_group() {
+        let plain = grouped(&[("proddb", "prod"), ("home", "personal")]);
+        let mut data = VaultData::new();
+        let r = merge_into(
+            &mut data,
+            decode_cxf(&plain).unwrap(),
+            false,
+            Some("shared"),
+        );
+        assert!(r.imported.iter().all(|i| i.group == "shared"));
+        assert_eq!(groups_of(&data), [("home", "shared"), ("proddb", "shared")]);
+    }
+
+    #[test]
+    fn items_in_no_collection_go_to_the_default_group() {
+        // `doc` writes no collections, as some other exporters do.
+        let items = [item("a", &basic(r#""x""#)), item("b", &basic(r#""y""#))].join(",");
+        let d = decode_cxf(&doc(&items)).unwrap();
+        assert!(d.items.iter().all(|i| i.collection.is_none()));
+        let mut data = VaultData::new();
+        data.set_default_group("inbox").unwrap();
+        merge_into(&mut data, d, false, None);
+        assert_eq!(groups_of(&data), [("a", "inbox"), ("b", "inbox")]);
+    }
+
+    #[test]
+    fn collection_lookup_rules() {
+        // Items: "a" (id A1), "b" (id B1), "c" (id C1), "d" (id D1).
+        let items = ["a", "b", "c", "d"]
+            .iter()
+            .map(|t| {
+                format!(
+                    r#"{{"id":"{}1","title":"{t}","credentials":[{}]}}"#,
+                    t.to_uppercase(),
+                    basic(r#""pw""#)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        // "a" is in two collections (the first wins); "b" is only in a
+        // nested one; "c" is in one with an invalid title; "d" is linked
+        // only under another account's id, so it is in no collection here.
+        let collections = r#"[
+            {"id":"K1","title":"first","items":[{"item":"A1"}],
+             "subCollections":[{"id":"K2","title":"nested","items":[{"item":"B1"}]}]},
+            {"id":"K3","title":"second","items":[{"item":"A1"},{"item":"D1","account":"OTHER"}]},
+            {"id":"K4","title":"bad name/\u001b","items":[{"item":"C1"}]}
+        ]"#;
+        let text = String::from_utf8(doc(&items)).unwrap().replace(
+            r#""collections":[]"#,
+            &format!(r#""collections":{collections}"#),
+        );
+        let d = decode_cxf(text.as_bytes()).unwrap();
+        let coll: Vec<(&str, Option<&str>)> = d
+            .items
+            .iter()
+            .map(|i| (i.alias.as_str(), i.collection.as_deref()))
+            .collect();
+        assert_eq!(
+            coll,
+            [
+                ("a", Some("first")),
+                ("b", Some("nested")),
+                ("c", None),
+                ("d", None)
+            ]
+        );
+        assert_eq!(d.bad_collections, ["bad name/\\u{1b}"]);
+    }
+
+    #[test]
+    fn with_key_accepts_a_key_a_file_or_reports_garbage() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = age::x25519::Identity::generate().to_public().to_string();
+        let b = age::x25519::Identity::generate().to_public().to_string();
+
+        // A key given directly.
+        assert_eq!(recipients_from_arg(&a).unwrap().len(), 1);
+        assert_eq!(recipients_from_arg(&format!("  {a}\n")).unwrap().len(), 1);
+
+        // A key file, one key per line.
+        let file = dir.path().join("team.keys");
+        fs::write(&file, format!("# team\n{a}\n\n{b}\n")).unwrap();
+        assert_eq!(
+            recipients_from_arg(file.to_str().unwrap()).unwrap().len(),
+            2
+        );
+        let bad_file = dir.path().join("bad.keys");
+        fs::write(&bad_file, format!("{a}\nnonsense\n")).unwrap();
+        let err = recipients_from_arg(bad_file.to_str().unwrap())
+            .err()
+            .unwrap();
+        assert!(err.contains("bad.keys, line 2"), "{err}");
+
+        // Garbage: named in the error.
+        let err = recipients_from_arg("no-such-file.pub").err().unwrap();
+        assert!(err.contains("`no-such-file.pub`"), "{err}");
+        assert!(err.contains("not a public key"), "{err}");
+        let err = recipients_from_arg("age1garbage").err().unwrap();
+        assert!(err.contains("not a valid age"), "{err}");
+        let err = recipients_from_arg("ssh-ed25519 AAAAnotbase64!! me@host")
+            .err()
+            .unwrap();
+        assert!(err.contains("not an age key"), "{err}");
+
+        // A private key, given directly or in a file, is never echoed back.
+        let secret = age::x25519::Identity::generate();
+        let secret = secret.to_string();
+        let secret = secret.expose_secret();
+        let err = recipients_from_arg(secret).err().unwrap();
+        assert!(err.contains("private key"), "{err}");
+        assert!(!err.contains(&secret[15..25]), "{err}");
+        let id_file = dir.path().join("key.txt");
+        fs::write(&id_file, format!("# public key: {a}\n{secret}\n")).unwrap();
+        let err = recipients_from_arg(id_file.to_str().unwrap())
+            .err()
+            .unwrap();
+        assert!(
+            err.contains("line 2") && err.contains("private key"),
+            "{err}"
+        );
+        assert!(!err.contains(&secret[15..25]), "{err}");
     }
 
     #[test]

@@ -11,6 +11,7 @@ use tacitty::alias;
 use tacitty::autostart;
 use tacitty::config::{self, Config};
 use tacitty::export;
+use tacitty::group;
 use tacitty::secret::SecretBuf;
 use tacitty::sys;
 use tacitty::update;
@@ -69,6 +70,10 @@ enum Cmd {
     /// Store a secret under an alias (prompts with echo off).
     Add {
         alias: String,
+        /// Put the alias in this group (default: the vault's default group;
+        /// an existing alias stays in its group).
+        #[arg(short, long, value_name = "GROUP")]
+        group: Option<String>,
         #[arg(long)]
         generate: bool,
         #[arg(long, default_value_t = 20)]
@@ -76,10 +81,23 @@ enum Cmd {
     },
     /// Remove an alias.
     Rm { alias: String },
-    /// Rename an alias.
+    /// Rename an alias (it stays in its group).
     Mv { old: String, new: String },
-    /// List aliases and timestamps (never secrets).
-    Ls,
+    /// List aliases by group, with timestamps (never secrets).
+    Ls {
+        /// Only list this group.
+        #[arg(short, long, value_name = "GROUP")]
+        group: Option<String>,
+    },
+    /// Organise aliases into groups.
+    #[command(after_help = "\
+Every alias is in exactly one group. Alias names stay unique across all
+groups, so @proddb works the same whichever group it is in. Groups are for
+listing (`tacitty ls -g prod`) and sharing (`tacitty export -g prod ...`).")]
+    Group {
+        #[command(subcommand)]
+        cmd: GroupCmd,
+    },
     /// Print a secret to stdout (refuses a TTY unless --force).
     Get {
         alias: String,
@@ -88,25 +106,31 @@ enum Cmd {
     },
     /// Write aliases to an encrypted file to share with someone.
     #[command(after_help = "\
-With no --to / --to-file, the file is protected by an export passphrase
-(asked twice, at least 12 characters). Quote SSH keys given to --to:
-  --to \"ssh-ed25519 AAAA... alice@laptop\"
-The file is a standard age file holding CXF JSON.")]
+Exports the named aliases plus every alias in the named groups; with
+neither, every alias. Group membership is kept in the file.
+
+With --with-key, the one file can be opened by each listed person with
+their own private key:
+  tacitty export -g prod --with-key alice.pub --with-key bob.pub -o prod.tacitty
+Quote keys given directly: --with-key \"ssh-ed25519 AAAA... alice@laptop\"
+Without --with-key, the file is protected by an export passphrase (asked
+twice, at least 12 characters). The file is a standard age file holding
+CXF JSON.")]
     Export {
-        /// Aliases to export (default: all of them).
+        /// Aliases to export.
         #[arg(value_name = "ALIAS")]
         aliases: Vec<String>,
+        /// Export every alias in this group. Repeatable.
+        #[arg(short, long = "group", value_name = "GROUP")]
+        groups: Vec<String>,
         /// File to write (created with mode 0600).
         #[arg(short, long, value_name = "FILE")]
         output: PathBuf,
-        /// Encrypt to this public key: age (age1...), ssh-ed25519 or
-        /// ssh-rsa. Repeatable.
-        #[arg(long = "to", value_name = "KEY")]
-        to: Vec<String>,
-        /// Encrypt to every public key in FILE, one per line (an
-        /// authorized_keys or GitHub .keys file). Repeatable.
-        #[arg(long = "to-file", value_name = "FILE")]
-        to_file: Vec<PathBuf>,
+        /// Encrypt to a public key (age1..., ssh-ed25519 or ssh-rsa), or to
+        /// every key in a file, one per line (a .pub, authorized_keys or
+        /// GitHub .keys file). Repeatable.
+        #[arg(long = "with-key", value_name = "KEY_OR_FILE")]
+        with_key: Vec<String>,
         /// Write ASCII-armored text (for pasting into chat or email).
         #[arg(long)]
         armor: bool,
@@ -122,6 +146,10 @@ The file is a standard age file holding CXF JSON.")]
         /// Default: ~/.ssh/id_ed25519 and ~/.ssh/id_rsa.
         #[arg(short = 'i', long = "identity", value_name = "IDENTITY")]
         identity: Vec<PathBuf>,
+        /// Put every imported alias in this group. Default: the group it
+        /// had in the file, or your default group.
+        #[arg(short, long, value_name = "GROUP")]
+        group: Option<String>,
         /// Replace aliases that already exist in your vault.
         #[arg(long)]
         overwrite: bool,
@@ -162,6 +190,39 @@ The file is a standard age file holding CXF JSON.")]
     Config,
 }
 
+#[derive(Subcommand)]
+enum GroupCmd {
+    /// List groups and how many aliases each holds.
+    Ls,
+    /// Move aliases into a group (created if it doesn't exist).
+    Move {
+        /// Aliases to move.
+        #[arg(value_name = "ALIAS", required = true)]
+        aliases: Vec<String>,
+        /// The group to move them into.
+        #[arg(long = "to", value_name = "GROUP")]
+        to: String,
+    },
+    /// Rename a group (if it is the default group, the default follows).
+    Rename {
+        /// The group's current name.
+        old: String,
+        /// Its new name (must not be an existing group).
+        new: String,
+    },
+    /// Delete a group, moving its aliases into the default group.
+    Rm {
+        /// The group to delete (not the default group). No alias or
+        /// secret is deleted.
+        group: String,
+    },
+    /// Show the default group for new aliases, or set it.
+    Default {
+        /// Make this the default group.
+        group: Option<String>,
+    },
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     // Every command may hold the decrypted vault or the master passphrase
@@ -181,25 +242,28 @@ fn main() -> Result<()> {
         Cmd::Init { no_autostart } => cmd_init(no_autostart),
         Cmd::Add {
             alias,
+            group,
             generate,
             length,
-        } => cmd_add(&alias, generate, length),
+        } => cmd_add(&alias, group.as_deref(), generate, length),
         Cmd::Rm { alias } => cmd_rm(&alias),
         Cmd::Mv { old, new } => cmd_mv(&old, &new),
-        Cmd::Ls => cmd_ls(),
+        Cmd::Ls { group } => cmd_ls(group.as_deref()),
+        Cmd::Group { cmd } => cmd_group(cmd),
         Cmd::Export {
             aliases,
+            groups,
             output,
-            to,
-            to_file,
+            with_key,
             armor,
             force,
-        } => cmd_export(&aliases, &output, &to, &to_file, armor, force),
+        } => cmd_export(&aliases, &groups, &output, &with_key, armor, force),
         Cmd::Import {
             file,
             identity,
+            group,
             overwrite,
-        } => cmd_import(&file, &identity, overwrite),
+        } => cmd_import(&file, &identity, group.as_deref(), overwrite),
         Cmd::Get { alias, force } => cmd_get(&alias, force),
         Cmd::Shell { autostart, command } => cmd_shell(command, autostart),
         Cmd::Enable => cmd_enable(),
@@ -307,6 +371,46 @@ fn ensure_unlocked(client: &mut Client) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("unlocking vault: {e}"))
 }
 
+/// Ask for the master passphrase and load the native vault.
+fn open_vault() -> Result<(PathBuf, SecretString, vault::VaultData)> {
+    let path = config::vault_path()?;
+    if !vault::exists(&path) {
+        bail!("no vault found (run `tacitty init` first)");
+    }
+    let pass = read_passphrase("Master passphrase: ")?;
+    let data = vault::load(&path, &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok((path, pass, data))
+}
+
+/// Save the vault, then lock the running agent (if there is one) so it
+/// drops its now-stale copy and reloads the file on the next unlock.
+fn save_vault(path: &Path, pass: &SecretString, data: &vault::VaultData) -> Result<()> {
+    vault::save(path, pass, data).map_err(|e| anyhow::anyhow!("{e}"))?;
+    if let Ok(mut c) = Client::connect(&config::agent_sock_path()?) {
+        let _ = c.lock();
+    }
+    Ok(())
+}
+
+/// Validate a group name given on the command line.
+fn check_group(name: &str) -> Result<()> {
+    group::validate(name)
+        .map_err(|e| anyhow::anyhow!("invalid group name `{}`: {e}", export::display_title(name)))
+}
+
+/// `@a, @b, @c`
+fn at_list<S: AsRef<str>>(aliases: &[S]) -> String {
+    aliases
+        .iter()
+        .map(|a| format!("@{}", a.as_ref()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
 // ---------------------------------------------------------------------------
 // commands
 // ---------------------------------------------------------------------------
@@ -363,11 +467,18 @@ fn cmd_disable() -> Result<i32> {
     Ok(0)
 }
 
-fn cmd_add(alias_name: &str, generate: bool, length: usize) -> Result<i32> {
+fn cmd_add(alias_name: &str, group: Option<&str>, generate: bool, length: usize) -> Result<i32> {
     alias::validate(alias_name).map_err(|e| anyhow::anyhow!("{e}"))?;
+    if let Some(g) = group {
+        check_group(g)?;
+    }
     let path = config::vault_path()?;
     if !vault::exists(&path) {
         bail!("no vault found (run `tacitty init` first)");
+    }
+    let cfg = load_config()?;
+    if group.is_some() && cfg.backend != tacitty::backend::BackendKind::Native {
+        bail!("groups are only available with the native vault backend");
     }
 
     let secret = if generate {
@@ -387,21 +498,22 @@ fn cmd_add(alias_name: &str, generate: bool, length: usize) -> Result<i32> {
     };
     vault::validate_secret(secret.as_slice()).map_err(|e| anyhow::anyhow!(e))?;
 
-    let cfg = load_config()?;
     if cfg.backend == tacitty::backend::BackendKind::Native {
         // Writing a new entry needs the passphrase directly, to re-encrypt
         // the vault file (the agent only ever holds a read-only in-memory
         // copy, and is never asked to write). Ask once here, then tell the
         // agent to drop its now-stale cached copy, if it happens to be
         // running.
-        let pass = read_passphrase("Master passphrase: ")?;
-        let mut data = vault::load(&path, &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
-        data.put(alias_name, secret.as_slice());
-        vault::save(&path, &pass, &data).map_err(|e| anyhow::anyhow!("{e}"))?;
-        if let Ok(mut c) = Client::connect(&config::agent_sock_path()?) {
-            let _ = c.lock();
+        let (path, pass, mut data) = open_vault()?;
+        match group {
+            Some(g) => data.put_in(alias_name, secret.as_slice(), g),
+            None => data.put(alias_name, secret.as_slice()),
         }
-        outln!("Saved @{alias_name}.");
+        save_vault(&path, &pass, &data)?;
+        outln!(
+            "Saved @{alias_name} in group {}.",
+            data.entries[alias_name].group
+        );
     } else if cfg.backend == tacitty::backend::BackendKind::SecretService {
         tacitty::backend::secret_service_put(alias_name, secret.as_slice())
             .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -448,115 +560,207 @@ fn generate_secret(length: usize) -> Result<SecretBuf> {
 }
 
 fn cmd_rm(alias_name: &str) -> Result<i32> {
-    let path = config::vault_path()?;
-    let pass = read_passphrase("Master passphrase: ")?;
-    let mut data = vault::load(&path, &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let (path, pass, mut data) = open_vault()?;
     if data.entries.remove(alias_name).is_none() {
         bail!("no such alias: {alias_name}");
     }
-    vault::save(&path, &pass, &data).map_err(|e| anyhow::anyhow!("{e}"))?;
-    if let Ok(mut c) = agent_client(&load_config()?) {
-        let _ = c.lock();
-    }
+    save_vault(&path, &pass, &data)?;
     outln!("Removed @{alias_name}.");
     Ok(0)
 }
 
 fn cmd_mv(old: &str, new: &str) -> Result<i32> {
     alias::validate(new).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let path = config::vault_path()?;
-    let pass = read_passphrase("Master passphrase: ")?;
-    let mut data = vault::load(&path, &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let (path, pass, mut data) = open_vault()?;
+    // The entry, group included, moves to its new name unchanged.
     let entry = data
         .entries
         .remove(old)
         .ok_or_else(|| anyhow::anyhow!("no such alias: {old}"))?;
     data.entries.insert(new.to_string(), entry);
-    vault::save(&path, &pass, &data).map_err(|e| anyhow::anyhow!("{e}"))?;
-    if let Ok(mut c) = agent_client(&load_config()?) {
-        let _ = c.lock();
-    }
+    save_vault(&path, &pass, &data)?;
     outln!("Renamed @{old} to @{new}.");
     Ok(0)
 }
 
-fn cmd_ls() -> Result<i32> {
-    let cfg = load_config()?;
+fn cmd_ls(only: Option<&str>) -> Result<i32> {
+    if let Some(g) = only {
+        check_group(g)?;
+    }
     let path = config::vault_path()?;
     if !vault::exists(&path) {
         outln!("(no vault yet — run `tacitty init`)");
         return Ok(0);
     }
-    let pass = read_passphrase("Master passphrase: ")?;
-    let data = vault::load(&path, &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
-    if data.entries.is_empty() {
+    let (_, _, data) = open_vault()?;
+    if let Some(g) = only {
+        if !data.has_group(g) {
+            bail!("no such group: {g}");
+        }
+    } else if data.entries.is_empty() {
         outln!("(no aliases yet — run `tacitty add <alias>`)");
         return Ok(0);
     }
-    for (alias_name, e) in &data.entries {
-        outln!(
-            "{:<32}  created {}  updated {}",
-            format!("@{alias_name}"),
-            fmt_time(e.created),
-            fmt_time(e.updated)
-        );
+    let mut first = true;
+    for (g, count) in data.groups() {
+        if only.is_some_and(|o| o != g) {
+            continue;
+        }
+        if !first {
+            outln!();
+        }
+        first = false;
+        let mark = if g == data.default_group {
+            " (default)"
+        } else {
+            ""
+        };
+        outln!("{g}{mark}");
+        if count == 0 {
+            outln!("  (no aliases)");
+        }
+        for (alias_name, e) in data.entries.iter().filter(|(_, e)| e.group == g) {
+            outln!(
+                "  {:<32}  created {}  updated {}",
+                format!("@{alias_name}"),
+                fmt_time(e.created),
+                fmt_time(e.updated)
+            );
+        }
     }
-    let _ = cfg;
+    Ok(0)
+}
+
+fn cmd_group(cmd: GroupCmd) -> Result<i32> {
+    // Names are checked before the passphrase is asked for.
+    match &cmd {
+        GroupCmd::Ls | GroupCmd::Default { group: None } => {}
+        GroupCmd::Move { to, .. } => check_group(to)?,
+        GroupCmd::Rename { old, new } => {
+            check_group(old)?;
+            check_group(new)?;
+        }
+        GroupCmd::Rm { group } | GroupCmd::Default { group: Some(group) } => check_group(group)?,
+    }
+    let (path, pass, mut data) = open_vault()?;
+    let fail = |e: String| anyhow::anyhow!(e);
+    match cmd {
+        GroupCmd::Ls => {
+            for (g, count) in data.groups() {
+                let mark = if g == data.default_group {
+                    "  (default)"
+                } else {
+                    ""
+                };
+                outln!("{g:<24}  {:>11}{mark}", plural(count, "alias", "aliases"));
+            }
+        }
+        GroupCmd::Move { mut aliases, to } => {
+            let mut seen = std::collections::BTreeSet::new();
+            aliases.retain(|a| seen.insert(a.clone()));
+            let moved = data.move_to_group(&aliases, &to).map_err(fail)?;
+            if !moved.is_empty() {
+                save_vault(&path, &pass, &data)?;
+                outln!("Moved {} to group {to}.", at_list(&moved));
+            }
+            let already: Vec<&String> = aliases.iter().filter(|a| !moved.contains(a)).collect();
+            if !already.is_empty() {
+                outln!("Already in group {to}: {}.", at_list(&already));
+            }
+        }
+        GroupCmd::Rename { old, new } => {
+            let was_default = data.default_group == old;
+            let n = data.rename_group(&old, &new).map_err(fail)?;
+            save_vault(&path, &pass, &data)?;
+            outln!(
+                "Renamed group {old} to {new} ({}).",
+                plural(n, "alias", "aliases")
+            );
+            if was_default {
+                outln!("{new} is still the default group for new aliases.");
+            }
+        }
+        GroupCmd::Rm { group } => {
+            let moved = data.remove_group(&group).map_err(fail)?;
+            save_vault(&path, &pass, &data)?;
+            outln!("Removed group {group}.");
+            if !moved.is_empty() {
+                outln!("Moved {} to group {}.", at_list(&moved), data.default_group);
+            }
+        }
+        GroupCmd::Default { group: None } => {
+            outln!(
+                "New aliases go into group {} (the default group).",
+                data.default_group
+            );
+        }
+        GroupCmd::Default { group: Some(g) } => {
+            if data.default_group == g {
+                outln!("{g} is already the default group.");
+            } else {
+                data.set_default_group(&g).map_err(fail)?;
+                save_vault(&path, &pass, &data)?;
+                outln!("New aliases now go into group {g}.");
+            }
+        }
+    }
     Ok(0)
 }
 
 fn cmd_export(
     aliases: &[String],
+    groups: &[String],
     output: &Path,
-    to: &[String],
-    to_file: &[PathBuf],
+    with_key: &[String],
     armor: bool,
     force: bool,
 ) -> Result<i32> {
     // Everything that can fail without a passphrase is checked first, so
     // nobody types passphrases only to hit a bad key or an existing file.
     export::check_output_path(output, force)?;
+    for g in groups {
+        check_group(g)?;
+    }
     let mut recipients = Vec::new();
-    for key in to {
-        recipients.push(export::parse_recipient(key).map_err(|e| anyhow::anyhow!("--to: {e}"))?);
-    }
-    for file in to_file {
-        recipients.extend(export::read_recipients_file(file).map_err(|e| anyhow::anyhow!(e))?);
-    }
-    let path = config::vault_path()?;
-    if !vault::exists(&path) {
-        bail!("no vault found (run `tacitty init` first)");
+    for value in with_key {
+        recipients.extend(
+            export::recipients_from_arg(value).map_err(|e| anyhow::anyhow!("--with-key: {e}"))?,
+        );
     }
 
-    let pass = read_passphrase("Master passphrase: ")?;
-    let data = vault::load(&path, &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let (_, pass, data) = open_vault()?;
     drop(pass);
-    let mut names: Vec<&str> = Vec::new();
-    if aliases.is_empty() {
-        names.extend(data.entries.keys().map(String::as_str));
-    } else {
-        for a in aliases {
-            if !data.entries.contains_key(a) {
-                bail!("no such alias: {a} (nothing was exported)");
-            }
-            if !names.contains(&a.as_str()) {
-                names.push(a);
-            }
+    for g in groups {
+        if !data.has_group(g) {
+            bail!("no such group: {g} (nothing was exported)");
         }
     }
-    if names.is_empty() {
-        bail!("the vault has no aliases to export");
+    for a in aliases {
+        if !data.entries.contains_key(a) {
+            bail!("no such alias: {a} (nothing was exported)");
+        }
     }
-    let entries: Vec<export::ExportEntry> = names
+    let everything = aliases.is_empty() && groups.is_empty();
+    let selected: Vec<(&str, &vault::Entry)> = data
+        .entries
         .iter()
-        .map(|&a| {
-            let e = &data.entries[a];
-            export::ExportEntry {
-                alias: a,
-                secret: e.secret.as_slice(),
-                created: e.created,
-                updated: e.updated,
-            }
+        .filter(|(a, e)| everything || aliases.contains(a) || groups.contains(&e.group))
+        .map(|(a, e)| (a.as_str(), e))
+        .collect();
+    if selected.is_empty() {
+        if everything {
+            bail!("the vault has no aliases to export");
+        }
+        bail!("nothing to export: the selected groups have no aliases");
+    }
+    let entries: Vec<export::ExportEntry> = selected
+        .iter()
+        .map(|&(a, e)| export::ExportEntry {
+            alias: a,
+            group: &e.group,
+            secret: e.secret.as_slice(),
+            created: e.created,
+            updated: e.updated,
         })
         .collect();
     let plain = export::encode_cxf(&entries, vault::now_unix())?;
@@ -578,13 +782,15 @@ fn cmd_export(
     drop(plain);
     export::write_export_file(output, &cipher, force)?;
 
-    let list: Vec<String> = names.iter().map(|a| format!("@{a}")).collect();
     outln!(
-        "Exported {} alias{} to {}: {}",
-        names.len(),
-        if names.len() == 1 { "" } else { "es" },
-        output.display(),
-        list.join(", ")
+        "Exported {} to {}:",
+        plural(selected.len(), "alias", "aliases"),
+        output.display()
+    );
+    print_by_group(
+        selected
+            .iter()
+            .map(|(a, e)| (e.group.as_str(), format!("@{a}"))),
     );
     let form = if armor { "armored" } else { "binary" };
     if recipient_count == 0 {
@@ -604,7 +810,26 @@ fn ask_key_passphrase(prompt: &str) -> Option<SecretString> {
     read_passphrase(prompt).ok()
 }
 
-fn cmd_import(file: &Path, identity: &[PathBuf], overwrite: bool) -> Result<i32> {
+/// Print `  group <name>: <label>, <label>` lines, one per group, in name order.
+fn print_by_group<'a>(items: impl Iterator<Item = (&'a str, String)>) {
+    let mut by_group: std::collections::BTreeMap<&str, Vec<String>> = Default::default();
+    for (g, label) in items {
+        by_group.entry(g).or_default().push(label);
+    }
+    for (g, labels) in by_group {
+        outln!("  group {g}: {}", labels.join(", "));
+    }
+}
+
+fn cmd_import(
+    file: &Path,
+    identity: &[PathBuf],
+    group: Option<&str>,
+    overwrite: bool,
+) -> Result<i32> {
+    if let Some(g) = group {
+        check_group(g)?;
+    }
     let path = config::vault_path()?;
     if !vault::exists(&path) {
         bail!("no vault found (run `tacitty init` first)");
@@ -662,29 +887,38 @@ fn cmd_import(file: &Path, identity: &[PathBuf], overwrite: bool) -> Result<i32>
             ..Default::default()
         }
     } else {
-        let pass = read_passphrase("Master passphrase: ")?;
-        let mut data = vault::load(&path, &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
-        let report = export::merge_into(&mut data, decoded, overwrite);
-        if !report.added.is_empty() || !report.replaced.is_empty() {
-            vault::save(&path, &pass, &data).map_err(|e| anyhow::anyhow!("{e}"))?;
-            if let Ok(mut c) = Client::connect(&config::agent_sock_path()?) {
-                let _ = c.lock();
+        let (path, pass, mut data) = open_vault()?;
+        if group.is_none() {
+            for title in &decoded.bad_collections {
+                outln!(
+                    "Note: collection `{title}` is not a valid group name; its aliases go \
+                     into group {}.",
+                    data.default_group
+                );
             }
+        }
+        let report = export::merge_into(&mut data, decoded, overwrite, group);
+        if !report.imported.is_empty() {
+            save_vault(&path, &pass, &data)?;
         }
         report
     };
 
-    let at = |v: &[String]| v.iter().map(|a| format!("@{a}")).collect::<Vec<_>>();
-    let mut imported = at(&report.added);
-    imported.extend(
-        at(&report.replaced)
-            .into_iter()
-            .map(|a| format!("{a} (replaced)")),
-    );
-    if imported.is_empty() {
+    if report.imported.is_empty() {
         outln!("Imported nothing.");
     } else {
-        outln!("Imported {}: {}", imported.len(), imported.join(", "));
+        outln!(
+            "Imported {}:",
+            plural(report.imported.len(), "alias", "aliases")
+        );
+        print_by_group(report.imported.iter().map(|i| {
+            let label = if i.replaced {
+                format!("@{} (replaced)", i.alias)
+            } else {
+                format!("@{}", i.alias)
+            };
+            (i.group.as_str(), label)
+        }));
     }
     if !report.skipped.is_empty() {
         outln!("Skipped {}:", report.skipped.len());

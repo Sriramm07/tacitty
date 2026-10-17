@@ -5,7 +5,6 @@
 **Password aliases for your terminal.**<br>
 Type `@proddb` at any password prompt and the real secret is sent instead.
 
-[![CI](https://github.com/Sriramm07/tacitty/actions/workflows/ci.yml/badge.svg)](https://github.com/Sriramm07/tacitty/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Sriramm07/tacitty?color=8b5cf6)](https://github.com/Sriramm07/tacitty/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Linux-0ea5e9)](docs/GUIDE.md#install)
 [![Rust](https://img.shields.io/badge/built%20with-Rust-f97316)](https://www.rust-lang.org)
@@ -143,17 +142,3 @@ taciTTY is free and open source, licensed under either of
 
 - [MIT license](LICENSE-MIT), or
 - [Apache License, Version 2.0](LICENSE-APACHE)
-
-at your option. You can use it anywhere, including at work and in
-commercial settings.
-
-Unless you explicitly state otherwise, any contribution you intentionally
-submit for inclusion in taciTTY, as defined in the Apache-2.0 license, is
-dual-licensed as above, without any additional terms or conditions.
-
-## 🤖 AI disclosure
-
-All of taciTTY's code, tests and documentation were written by
-[Claude](https://claude.com/claude-code), under the direction of the
-project's author, who designed it, made its decisions, and is responsible
-for it.

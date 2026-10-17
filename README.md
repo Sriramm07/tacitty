@@ -10,7 +10,7 @@ Type `@proddb` at any password prompt and the real secret is sent instead.
 [![Rust](https://img.shields.io/badge/built%20with-Rust-f97316)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-64748b)](#license)
 
-<img src="assets/demo.gif" alt="tacitty demo: ssh to a server with @admin (unlocking the vault on first use), become root with @root, then open PostgreSQL with @pgdb" width="860">
+<img src="assets/demo.gif" alt="tacitty demo: save a password as @admin, ssh to a server with @admin (unlocking the vault on first use), become root with @root, then open PostgreSQL with @pgdb" width="860">
 
 </div>
 

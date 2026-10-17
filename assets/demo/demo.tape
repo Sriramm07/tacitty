@@ -57,25 +57,19 @@ Sleep 500ms
 Show
 
 Sleep 500ms
-Type "# 1. Unlock your vault once" Enter
-Sleep 300ms
-Type "tacitty unlock" Enter
-Wait+Screen /Master passphrase/
-Sleep 400ms
-Type "my vault passphrase" Enter
-Wait+Screen /Unlocked/
-Sleep 2.8s
-
-Type "# 2. SSH in: type @admin at the password prompt (hidden, like any password)" Enter
+Type "# 1. SSH in: type @admin at the password prompt (first use asks for your vault passphrase)" Enter
 Sleep 300ms
 Type "ssh admin@10.42.0.15" Enter
 Wait+Screen /password:/
 Sleep 1.8s
 Type "@admin" Enter
+Wait+Screen /unlock vault/
+Sleep 1.2s
+Type "my vault passphrase" Enter
 Wait+Screen /admin@db-prod/
 Sleep 3.2s
 
-Type "# 3. Become root: @root" Enter
+Type "# 2. Become root: @root" Enter
 Sleep 300ms
 Type "su -" Enter
 Wait+Screen /Password:/
@@ -84,7 +78,7 @@ Type "@root" Enter
 Wait+Screen /root@db-prod/
 Sleep 3.2s
 
-Type "# 4. Open the database as postgres: @pgdb" Enter
+Type "# 3. Open the database as postgres: @pgdb" Enter
 Sleep 300ms
 Type "su - postgres" Enter
 Wait+Screen /postgres@db-prod/
@@ -114,7 +108,7 @@ Sleep 1.8s
 Type "clear" Enter
 Sleep 300ms
 
-Type "# 5. Everywhere else, @admin is just text" Enter
+Type "# 4. Everywhere else, @admin is just text" Enter
 Sleep 300ms
 Type "echo @admin" Enter
 Sleep 5s

@@ -24,7 +24,7 @@ surfers. taciTTY lets you type a short, memorable alias instead. It works at
 **any** terminal password prompt: `sudo`, `su`, `ssh`, `psql`, `mysql`,
 `gpg`, `read -s`, Python's `getpass` and more.
 
-- 🎯 **Only at real password prompts.** Type `@proddb` in a normal shell
+- 🎯 **Only at password prompts.** Type `@proddb` in a normal shell
   line, in `vim` or in `less`, and it stays plain text.
 - 🔒 **Local and encrypted.** Secrets live in an
   [`age`](https://github.com/str4d/rage)-encrypted vault on your machine.
@@ -59,6 +59,9 @@ $ sudo systemctl restart nginx
 If the vault is locked, taciTTY asks for your master passphrase the first
 time you use an alias. It then stays unlocked, for every terminal, until it
 has been idle for 15 minutes.
+
+Is one of your *real* passwords starting with `@`? Type `@@` for a literal
+`@` at a prompt: `@@Summer2024` sends `@Summer2024` exactly as typed.
 
 ## 📖 Commands
 

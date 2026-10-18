@@ -53,6 +53,7 @@ impl Env {
             "XDG_STATE_HOME",
             "NO_TACITTY",
             "TACITTY_RELEASES_URL",
+            "TACITTY_TEST_AGENT_IDLE_SECS",
         ] {
             cmd.env_remove(var);
         }

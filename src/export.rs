@@ -775,6 +775,26 @@ fn read_limited(path: &Path, max: u64) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// Like [`read_limited`], for files holding private keys: read straight into
+/// a self-wiping buffer, so no intermediate copy of the key is ever freed
+/// without being wiped (a plain `Vec` reallocates as it grows).
+fn read_limited_secret(path: &Path, max: u64) -> io::Result<SecretBuf> {
+    let mut f = File::open(path)?.take(max + 1);
+    let mut out = SecretBuf::with_capacity(4096);
+    let mut chunk = Zeroizing::new([0u8; 4096]);
+    loop {
+        let n = f.read(&mut chunk[..])?;
+        if n == 0 {
+            break;
+        }
+        out.extend_from_slice(&chunk[..n]);
+    }
+    if out.len() as u64 > max {
+        return Err(io::Error::other("file is too large"));
+    }
+    Ok(out)
+}
+
 /// Asks the user for an SSH key's passphrase; `None` if they can't be asked.
 pub type AskPassphrase = fn(&str) -> Option<SecretString>;
 
@@ -837,10 +857,8 @@ pub fn load_identities(
     ask: AskPassphrase,
 ) -> Result<Vec<Box<dyn age::Identity>>, ExportError> {
     let label = path.display().to_string();
-    let data = Zeroizing::new(
-        read_limited(path, MAX_KEY_FILE)
-            .map_err(|e| ExportError::Invalid(format!("reading {label}: {e}")))?,
-    );
+    let data = read_limited_secret(path, MAX_KEY_FILE)
+        .map_err(|e| ExportError::Invalid(format!("reading {label}: {e}")))?;
     let has = |needle: &[u8]| data.windows(needle.len()).any(|w| w == needle);
     if has(b"AGE-SECRET-KEY-1") {
         let ids = age::IdentityFile::from_buffer(&data[..])

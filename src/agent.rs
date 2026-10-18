@@ -118,6 +118,16 @@ pub struct Request {
     pub passphrase: Option<HexSecret>,
 }
 
+// The alias may really be a hand-typed password that starts with the
+// trigger character, so it is wiped like one.
+impl Drop for Request {
+    fn drop(&mut self) {
+        if let Some(a) = self.alias.as_mut() {
+            a.zeroize();
+        }
+    }
+}
+
 impl Request {
     fn op(op: Op) -> Self {
         Request {
@@ -192,6 +202,7 @@ fn read_frame<R: Read>(r: &mut R) -> Result<Zeroizing<Vec<u8>>, AgentError> {
 
 pub struct Client {
     stream: UnixStream,
+    sock_path: PathBuf,
 }
 
 impl Client {
@@ -207,20 +218,40 @@ impl Client {
                 "refusing to talk to agent socket owned by uid {peer}"
             )));
         }
-        Ok(Client { stream })
+        Ok(Client {
+            stream,
+            sock_path: sock_path.to_path_buf(),
+        })
     }
 
+    /// Send `req` and read the reply. The agent closes connections that sit
+    /// idle (see `handle_conn`), and a long-lived client such as the
+    /// wrapper, or a CLI command waiting while the user types a passphrase,
+    /// can outlast that. So if the connection itself fails, reconnect
+    /// (with the same peer check, starting the agent again if it has gone)
+    /// and retry once. Every request is safe to repeat.
     fn call(&mut self, req: &Request) -> Result<Response, AgentError> {
         let body = encode(req)?;
-        write_frame(&mut self.stream, body.as_slice())?;
+        match self.exchange(body.as_slice()) {
+            Err(AgentError::Io(_)) => {
+                *self = connect_or_start(&self.sock_path)?;
+                self.exchange(body.as_slice())
+            }
+            other => other,
+        }
+    }
+
+    fn exchange(&mut self, body: &[u8]) -> Result<Response, AgentError> {
+        write_frame(&mut self.stream, body)?;
         let resp_body = read_frame(&mut self.stream)?;
         serde_json::from_slice(&resp_body).map_err(|e| AgentError::Protocol(e.to_string()))
     }
 
     pub fn get(&mut self, alias: &str) -> Result<SecretBuf, AgentError> {
         let resp = self.call(&Request {
+            op: Op::Get,
             alias: Some(alias.to_string()),
-            ..Request::op(Op::Get)
+            passphrase: None,
         })?;
         if !resp.ok {
             return Err(match resp.message.as_deref() {
@@ -268,8 +299,9 @@ impl Client {
     pub fn unlock(&mut self, passphrase: &SecretString) -> Result<(), AgentError> {
         use secrecy::ExposeSecret;
         let resp = self.call(&Request {
+            op: Op::Unlock,
+            alias: None,
             passphrase: Some(HexSecret::from_bytes(passphrase.expose_secret().as_bytes())),
-            ..Request::op(Op::Unlock)
         })?;
         if resp.ok {
             Ok(())
@@ -436,13 +468,29 @@ fn file_identity(path: &Path) -> Option<(u64, u64)> {
         .map(|m| (m.dev(), m.ino()))
 }
 
+/// How long a connection may sit idle before the agent closes it. Test
+/// builds can shorten it (`TACITTY_TEST_AGENT_IDLE_SECS`) so reconnecting
+/// can be tested without long waits.
+fn idle_connection_timeout() -> Duration {
+    if cfg!(feature = "test-hooks") {
+        if let Some(secs) = std::env::var("TACITTY_TEST_AGENT_IDLE_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|n| *n > 0)
+        {
+            return Duration::from_secs(secs);
+        }
+    }
+    Duration::from_secs(30)
+}
+
 fn handle_conn(mut stream: UnixStream, state: Arc<Mutex<ServerState>>) -> Result<(), AgentError> {
     let peer = sys::peer_uid(std::os::fd::AsRawFd::as_raw_fd(&stream))?;
     if peer != sys::geteuid() {
         crate::logging::event("agent: rejected connection from foreign uid");
         return Err(AgentError::Protocol("peer uid mismatch".into()));
     }
-    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    stream.set_read_timeout(Some(idle_connection_timeout()))?;
     loop {
         let body = match read_frame(&mut stream) {
             Ok(b) => b,
@@ -547,8 +595,9 @@ mod tests {
     #[test]
     fn debug_never_shows_secrets() {
         let req = Request {
+            op: Op::Unlock,
+            alias: None,
             passphrase: Some(HexSecret::from_bytes(b"hunter2")),
-            ..Request::op(Op::Unlock)
         };
         let shown = format!("{req:?}");
         assert!(!shown.contains(&HexSecret::from_bytes(b"hunter2").0));

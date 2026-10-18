@@ -310,8 +310,11 @@ plain text, so only do it when you mean to.
 
 **Protects against:** shoulder surfing; shell history; clipboard sniffers
 and clipboard managers; keyloggers watching injected keystrokes (there are
-none); expanding an alias into the wrong program; secrets ending up in
-logs, core dumps or terminal scrollback. It also reduces, but can't rule
+none); secrets ending up in logs, core dumps or terminal scrollback. An
+alias only expands while the terminal is hiding input (or at a detected
+remote prompt), which keeps it out of editors, pagers and normal command
+lines; but any program that switches echo off and reads a line gets the
+secret, so only type an alias where you mean to enter that password. It also reduces, but can't rule
 out, secrets being written to swap: memory locking is best effort, and
 some buffers inside the encryption library aren't locked.
 
@@ -325,15 +328,24 @@ prevented); someone who can overwrite the vault or config files.
 
 - Secrets never touch command-line arguments, environment variables, the
   clipboard, disk (except the encrypted vault and encrypted export files
-  you create), logs, or the output stream.
+  you create), or logs. They only appear on screen or on stdout where you
+  explicitly ask for that (`tacitty get`).
+- A password you type **by hand** that starts with `@` is read as an alias
+  name. taciTTY never passes such a name to a helper program unless the
+  helper knows it (`pass`: the entry exists; `command`: it's in the
+  configured `list`), and wipes it from memory afterwards. Type `@@` to
+  send a literal `@`. With the `secret-service` backend, or a `command`
+  backend without a `list`, the name is passed to the helper's command
+  line, so use `@@` there.
 - Every taciTTY command turns off core dumps and debugger attachment at
   startup (`RLIMIT_CORE=0`, plus `PR_SET_DUMPABLE=0` on Linux and
   `PT_DENY_ATTACH` on macOS). Your own shell gets its normal core-dump
   limit back and stays debuggable. On macOS this means taciTTY can't be
   run under a debugger such as lldb: it exits at once.
-- Every buffer that holds a secret is wiped as soon as it's no longer
-  needed (`zeroize`), locked into memory where possible (`mlock`), and never
-  printed in debug output. That includes the messages between taciTTY and
+- Every buffer in taciTTY's own code that holds a secret is wiped as soon
+  as it's no longer needed (`zeroize`), locked into memory where possible
+  (`mlock`), and never printed in debug output. (Some buffers inside the
+  encryption library itself are freed without wiping.) That includes the messages between taciTTY and
   its agent, and the agent doesn't keep your master passphrase after
   unlocking.
 - `TACITTY_LOG` records fixed status labels only, never input, aliases or
@@ -355,8 +367,13 @@ prevented); someone who can overwrite the vault or config files.
 - The agent's socket checks each caller's user ID and rejects everyone
   else. Like `ssh-agent`, other programs running as *you* can query it
   while the vault is unlocked.
-- Every release is built only after the dependency tree passes `cargo audit`
-  and `cargo deny` (known advisories, licences, banned crates, sources). `openssl` is
+- Every release is built only after the full test suite passes and the
+  dependency tree passes `cargo audit` and `cargo deny` (known advisories,
+  licences, banned crates, sources). One advisory is accepted, with the
+  reasoning in `deny.toml` and `.cargo/audit.toml`: RUSTSEC-2023-0071, a
+  timing side channel in the `rsa` crate used only for `ssh-rsa` keys in
+  export/import, where a single local decryption can't be timed by an
+  attacker. `openssl` is
   banned from the dependency tree; all cryptography is pure Rust (`age`,
   `chacha20poly1305`, `scrypt`).
 - Releases are built by GitHub Actions with read-only permissions, every

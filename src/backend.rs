@@ -166,9 +166,28 @@ pub struct PassBackend {
     pub cfg: PassConfig,
 }
 
+/// Does `<store>/<path>.gpg` exist? The store is `$PASSWORD_STORE_DIR`, or
+/// `~/.password-store` as in `pass` itself.
+fn pass_entry_exists(path: &str) -> bool {
+    let store = match std::env::var_os("PASSWORD_STORE_DIR") {
+        Some(d) if !d.is_empty() => std::path::PathBuf::from(d),
+        _ => match std::env::var_os("HOME") {
+            Some(h) if !h.is_empty() => std::path::PathBuf::from(h).join(".password-store"),
+            _ => return false,
+        },
+    };
+    store.join(format!("{path}.gpg")).is_file()
+}
+
 impl SecretBackend for PassBackend {
     fn get(&self, alias: &str) -> Result<SecretBuf, BackendError> {
         let path = format!("{}/{}", self.cfg.prefix, alias);
+        // Only ask `pass` for entries that exist. What was typed after the
+        // trigger may be a hand-typed password rather than an alias, and it
+        // must not end up on a command line (visible in `ps`).
+        if !pass_entry_exists(&path) {
+            return Err(BackendError::NotFound(alias.to_string()));
+        }
         let (status, out) = run_helper(Command::new("pass").arg("show").arg(&path), "pass show")?;
         if !status.success() {
             return Err(BackendError::NotFound(alias.to_string()));
@@ -328,6 +347,12 @@ fn split_template(template: &str, alias: &str) -> Result<Vec<String>, BackendErr
 
 impl SecretBackend for CommandBackend {
     fn get(&self, alias: &str) -> Result<SecretBuf, BackendError> {
+        // With a `list` command configured, only look up names it knows, so
+        // a hand-typed password starting with the trigger is never passed
+        // to the `get` command's arguments.
+        if !self.cfg.list.trim().is_empty() && !self.list()?.iter().any(|a| a == alias) {
+            return Err(BackendError::NotFound(alias.to_string()));
+        }
         let words = split_template(&self.cfg.get, alias)?;
         let (status, out) = run_helper(Command::new(&words[0]).args(&words[1..]), &words[0])?;
         if !status.success() {
@@ -419,5 +444,43 @@ mod tests {
         let (status, _) =
             run_helper(Command::new("sh").args(["-c", "exec 3</dev/tty"]), "sh").unwrap();
         assert!(!status.success(), "helper could open the terminal");
+    }
+
+    #[test]
+    fn pass_is_only_asked_about_entries_that_exist() {
+        let store = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(store.path().join("tacitty")).unwrap();
+        std::fs::write(store.path().join("tacitty/known.gpg"), b"x").unwrap();
+        std::env::set_var("PASSWORD_STORE_DIR", store.path());
+        assert!(pass_entry_exists("tacitty/known"));
+        assert!(!pass_entry_exists("tacitty/Summer2024"));
+        let backend = PassBackend {
+            cfg: PassConfig {
+                prefix: "tacitty".into(),
+            },
+        };
+        assert!(matches!(
+            backend.get("Summer2024"),
+            Err(BackendError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn command_backend_with_a_list_never_runs_get_for_unknown_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("get-ran");
+        let backend = CommandBackend {
+            cfg: CommandConfig {
+                get: format!("touch {}", marker.display()),
+                list: "printf known".into(),
+            },
+        };
+        assert!(matches!(
+            backend.get("Summer2024"),
+            Err(BackendError::NotFound(_))
+        ));
+        assert!(!marker.exists(), "get ran for a name not in the list");
+        let _ = backend.get("known");
+        assert!(marker.exists(), "get should run for a listed name");
     }
 }

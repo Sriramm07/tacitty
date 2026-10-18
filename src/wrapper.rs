@@ -617,7 +617,12 @@ fn handle_input_byte(
                 return;
             }
 
+            let mut alias = alias;
             deliver(master_fd, cfg, resolver, &alias, enter_byte, &still_valid);
+            // What was typed may have been a password typed by hand that
+            // happens to start with the trigger, not an alias: don't leave it
+            // lying around in memory.
+            zeroize::Zeroize::zeroize(&mut alias);
         }
     }
     if !sm.is_capturing() {

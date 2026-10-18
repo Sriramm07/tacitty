@@ -307,6 +307,9 @@ fn read_secret_from_tty() -> Result<SecretBuf> {
         .context("opening /dev/tty")?;
     let fd = tty.as_raw_fd();
     let saved = sys::tcgetattr(fd)?;
+    // Ctrl-C (or a TERM/HUP) while typing must not kill us with echo still
+    // switched off: catch it, restore the terminal below, then give up.
+    let signals = sys::SignalGuard::new().ok();
     let mut noecho = saved;
     noecho.c_lflag &= !(libc::ECHO);
     noecho.c_lflag |= libc::ICANON | libc::ECHONL;
@@ -321,7 +324,12 @@ fn read_secret_from_tty() -> Result<SecretBuf> {
     let mut buf = SecretBuf::new();
     let mut byte = [0u8; 1];
     let result = loop {
-        match sys::read_fd(fd, &mut byte) {
+        match sys::read_once(fd, &mut byte) {
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                if signals.as_ref().is_some_and(|g| g.triggered()) {
+                    break Err(std::io::Error::other("cancelled"));
+                }
+            }
             Ok(0) => break Ok(()),
             Ok(_) => {
                 if byte[0] == b'\n' || byte[0] == b'\r' {
@@ -335,7 +343,14 @@ fn read_secret_from_tty() -> Result<SecretBuf> {
         }
     };
     let _ = sys::tcsetattr(fd, libc::TCSANOW, &saved);
-    result.context("reading from /dev/tty")?;
+    drop(signals);
+    if let Err(e) = result {
+        if e.to_string() == "cancelled" {
+            outln!();
+            bail!("cancelled");
+        }
+        return Err(e).context("reading from /dev/tty");
+    }
     Ok(buf)
 }
 
@@ -499,6 +514,13 @@ fn cmd_add(alias_name: &str, group: Option<&str>, generate: bool, length: usize)
         s1
     };
     vault::validate_secret(secret.as_slice()).map_err(|e| anyhow::anyhow!(e))?;
+    if secret.as_slice().first() == Some(&b'~') {
+        eprintln!(
+            "Note: this secret starts with `~`. Inside an ssh session a `~` at \
+             the start of a line is ssh's escape character (`~.` disconnects), \
+             so typing it there behaves the same as typing it by hand would."
+        );
+    }
 
     if cfg.backend == tacitty::backend::BackendKind::Native {
         // Writing a new entry needs the passphrase directly, to re-encrypt

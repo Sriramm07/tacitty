@@ -1085,3 +1085,72 @@ fn longest_allowed_secret_is_delivered_whole() {
     p.send_line("exit").unwrap();
     p.exp_eof().unwrap();
 }
+
+/// The agent closes idle connections; the wrapper must reconnect instead of
+/// failing every later lookup in that shell.
+#[test]
+fn aliases_keep_working_after_the_agent_connection_goes_idle() {
+    let env = Env::fresh();
+    init_vault(&env, PASSPHRASE);
+    add_alias(&env, "prod-db", "s3cr3t!", PASSPHRASE);
+    // The wrapper starts the agent itself, so it inherits a 1 s idle timeout.
+    let mut cmd = env.command(&["shell"]);
+    cmd.env("SHELL", "/bin/bash");
+    cmd.env("PS1", "TESTPROMPT$ ");
+    cmd.env("TACITTY_TEST_AGENT_IDLE_SECS", "1");
+    let mut p = rexpect::session::spawn_command(cmd, Some(20_000)).unwrap();
+    p.send_line("PS1='TESTPROMPT$ '").unwrap();
+    p.exp_string("TESTPROMPT$ ").unwrap();
+    // The prompt text is assembled by printf so that "Password: " and
+    // "GOT[" only ever appear in bash's output, never in the echoed command.
+    let prompt = "bash -c 'read -s -p \"$(printf \"Pass%s: \" word)\" pw; echo; printf \"%s[%s]\\n\" GOT \"$pw\"'";
+
+    p.send_line(prompt).unwrap();
+    p.exp_string("Password: ").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    p.send("@prod-db\r").unwrap();
+    p.flush().unwrap();
+    p.exp_string("enter master passphrase to unlock vault")
+        .unwrap();
+    p.send_line(PASSPHRASE).unwrap();
+    p.exp_string("GOT[s3cr3t!]").unwrap();
+
+    // Let the agent drop the idle connection, then look up twice more.
+    for _ in 0..2 {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        p.send_line(prompt).unwrap();
+        p.exp_string("Password: ").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        p.send("@prod-db\r").unwrap();
+        p.flush().unwrap();
+        let (before, got) = p.exp_regex(r"GOT\[[^\]]*\]").unwrap();
+        assert_eq!(got, "GOT[s3cr3t!]", "{before:?}");
+        assert!(
+            !before.contains("unlock vault"),
+            "asked to unlock again: {before:?}"
+        );
+    }
+    p.send_line("exit").unwrap();
+    p.exp_eof().unwrap();
+}
+
+/// Ctrl-C at a passphrase prompt must leave the terminal echoing again.
+#[test]
+fn ctrl_c_at_passphrase_prompt_restores_echo() {
+    let env = Env::fresh();
+    let mut p = env.spawn_shell(15_000);
+    p.send_line(&format!(
+        "{} init --no-autostart; stty -a | tr ' ' '\\n' | grep -x -e echo -e -echo",
+        env.bin.display()
+    ))
+    .unwrap();
+    p.exp_string("New master passphrase:").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    p.send_control('c').unwrap();
+    p.exp_string("cancelled").unwrap();
+    // `stty -a` lists "echo" when echo is on and "-echo" when it is off.
+    let (_, state) = p.exp_regex(r"\n-?echo\r").unwrap();
+    assert_eq!(state.trim(), "echo", "terminal left with echo off");
+    p.send_line("exit").unwrap();
+    p.exp_eof().unwrap();
+}

@@ -3,3 +3,4 @@
 /fuzz/artifacts
 Cargo.lock.bak
 *.pdb
+__pycache__/

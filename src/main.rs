@@ -290,9 +290,11 @@ fn read_passphrase(prompt: &str) -> Result<SecretString> {
     std::io::stdout().flush().ok();
     let buf = read_secret_from_tty()?;
     outln!();
-    Ok(SecretString::from(
-        String::from_utf8_lossy(buf.as_slice()).into_owned(),
-    ))
+    // Refuse rather than "repair" invalid UTF-8: a lossy conversion would
+    // leave an unwiped copy and map different inputs to the same passphrase.
+    let text = std::str::from_utf8(buf.as_slice())
+        .map_err(|_| anyhow::anyhow!("the passphrase is not valid UTF-8 text"))?;
+    Ok(SecretString::from(text.to_string()))
 }
 
 /// Read one line from `/dev/tty` with echo off (spec §9: `add` reads from
@@ -627,8 +629,14 @@ fn cmd_ls(only: Option<&str>) -> Result<i32> {
             outln!("  (no aliases)");
         }
         for (alias_name, e) in data.entries.iter().filter(|(_, e)| e.group == g) {
+            // e.g. a secret stored before the length limit was lowered: it
+            // is kept, but would be refused at a prompt, so say so.
+            let note = match vault::validate_secret(e.secret.as_slice()) {
+                Ok(()) => String::new(),
+                Err(why) => format!("  (can't be sent: {why}; replace it with `tacitty add`)"),
+            };
             outln!(
-                "  {:<32}  created {}  updated {}",
+                "  {:<32}  created {}  updated {}{note}",
                 format!("@{alias_name}"),
                 fmt_time(e.created),
                 fmt_time(e.updated)

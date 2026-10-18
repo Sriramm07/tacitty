@@ -1,0 +1,15 @@
+# cargo-audit configuration (the release workflow runs `cargo audit`).
+#
+# Keep in sync with the [advisories] ignore list in deny.toml.
+[advisories]
+ignore = [
+    # `rsa` (pulled in by age's "ssh" feature, used only by
+    # `tacitty export --with-key ssh-rsa ...` / `tacitty import -i id_rsa`)
+    # has no fixed release for the Marvin timing attack. Exploiting it needs
+    # an attacker who can make the victim run many RSA decryptions and time
+    # each one precisely, i.e. a network-facing decryption oracle. tacitty
+    # does at most one RSA decryption per `import`, run by hand, and
+    # encrypting to an RSA public key involves no private-key operation.
+    # Re-check when age moves to rsa 0.10.
+    "RUSTSEC-2023-0071",
+]

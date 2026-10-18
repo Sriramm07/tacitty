@@ -144,6 +144,30 @@ pub fn is_packaged_install(exe: &Path) -> bool {
     exe.starts_with("/usr") || exe.starts_with("/opt")
 }
 
+/// For a Homebrew install, the running binary resolves to a versioned path
+/// (`<prefix>/Cellar/tacitty/<version>/bin/tacitty`) that `brew upgrade` /
+/// `brew cleanup` deletes, which would silently switch auto-start off. These
+/// are the stable paths Homebrew keeps pointing at the current version, in
+/// order of preference; empty for anything that isn't a Cellar path.
+pub fn stable_packaged_path(exe: &Path) -> Vec<PathBuf> {
+    let parts: Vec<_> = exe.components().collect();
+    let Some(i) = parts.iter().position(|c| c.as_os_str() == "Cellar") else {
+        return Vec::new();
+    };
+    let (Some(formula), Some(file)) = (parts.get(i + 1), exe.file_name()) else {
+        return Vec::new();
+    };
+    let prefix: PathBuf = parts[..i].iter().collect();
+    vec![
+        prefix
+            .join("opt")
+            .join(formula.as_os_str())
+            .join("bin")
+            .join(file),
+        prefix.join("bin").join(file),
+    ]
+}
+
 /// Make sure a stable copy of the running binary exists for the hook to
 /// call, and return its path. Packaged installs (see
 /// [`is_packaged_install`]) are used as-is; anything else (e.g. a binary
@@ -154,7 +178,10 @@ pub fn install_binary() -> Result<PathBuf> {
         .and_then(|p| p.canonicalize())
         .context("locating the running tacitty binary")?;
     if is_packaged_install(&exe) {
-        return Ok(exe);
+        return Ok(stable_packaged_path(&exe)
+            .into_iter()
+            .find(|p| p.is_file())
+            .unwrap_or(exe));
     }
     let dir = home()?.join(".local/bin");
     let target = dir.join("tacitty");
@@ -421,5 +448,23 @@ mod tests {
         assert!(b.contains(&format!("-ne {FALLBACK_EXIT_CODE}")));
         assert!(b.contains("NO_TACITTY"));
         assert!(b.contains("TACITTY_ACTIVE"));
+    }
+
+    #[test]
+    fn homebrew_cellar_paths_map_to_stable_links() {
+        let exe = Path::new("/opt/homebrew/Cellar/tacitty/0.1.0/bin/tacitty");
+        assert_eq!(
+            stable_packaged_path(exe),
+            vec![
+                PathBuf::from("/opt/homebrew/opt/tacitty/bin/tacitty"),
+                PathBuf::from("/opt/homebrew/bin/tacitty"),
+            ]
+        );
+        let intel = Path::new("/usr/local/Cellar/tacitty/0.2.0/bin/tacitty");
+        assert_eq!(
+            stable_packaged_path(intel)[0],
+            PathBuf::from("/usr/local/opt/tacitty/bin/tacitty")
+        );
+        assert!(stable_packaged_path(Path::new("/usr/bin/tacitty")).is_empty());
     }
 }

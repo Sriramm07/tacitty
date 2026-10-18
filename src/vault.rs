@@ -38,6 +38,15 @@ use crate::sys;
 const MAGIC_V1: &[u8] = b"PWV1\n";
 const MAGIC: &[u8] = b"PWV2\n";
 const MAX_PLAINTEXT: usize = 16 * 1024 * 1024;
+/// Most aliases a vault may hold. At the largest alias, group and secret
+/// sizes this stays well under [`MAX_PLAINTEXT`], so any vault `save`
+/// accepts can always be loaded again.
+pub const MAX_ENTRIES: usize = 10_000;
+/// scrypt cost (log2 N) for everything taciTTY encrypts with a passphrase:
+/// the vault and passphrase-mode export files. Fixed rather than taken from
+/// age's quick speed calibration, which can come out low on a busy machine;
+/// 18 means ~256 MiB of memory and about a second per guess.
+pub const SCRYPT_WORK_FACTOR: u8 = 18;
 /// Longest secret we accept. A secret is delivered as one line of
 /// canonical-mode input (plus Enter), and the terminal's line buffer is
 /// 4096 bytes on Linux but only 1024 (`MAX_CANON`) on macOS, so this stays
@@ -58,6 +67,8 @@ pub enum VaultError {
     Io(#[from] std::io::Error),
     #[error("{0}")]
     Crypto(String),
+    #[error("{0}; nothing was changed")]
+    TooLarge(String),
 }
 
 pub struct Entry {
@@ -277,11 +288,19 @@ impl VaultData {
             data.default_group = c.group()?;
         }
         let n = u32::from_be_bytes(c.take(4)?.try_into().unwrap());
+        if n as usize > MAX_ENTRIES {
+            return Err(VaultError::Corrupt("too many entries".into()));
+        }
         for _ in 0..n {
             let alen = u16::from_be_bytes(c.take(2)?.try_into().unwrap()) as usize;
             let alias = std::str::from_utf8(c.take(alen)?)
-                .map_err(|_| VaultError::Corrupt("non-UTF-8 alias".into()))?
+                .ok()
+                .filter(|a| crate::alias::validate(a).is_ok())
+                .ok_or_else(|| VaultError::Corrupt("invalid alias name".into()))?
                 .to_string();
+            if data.entries.contains_key(&alias) {
+                return Err(VaultError::Corrupt("duplicate alias".into()));
+            }
             let group = if v2 {
                 c.group()?
             } else {
@@ -329,9 +348,7 @@ fn clone_pass(p: &SecretString) -> SecretString {
 
 pub fn encrypt(plain: &[u8], passphrase: &SecretString) -> Result<Vec<u8>, VaultError> {
     let mut rec = age::scrypt::Recipient::new(clone_pass(passphrase));
-    if let Some(n) = test_work_factor() {
-        rec.set_work_factor(n);
-    }
+    rec.set_work_factor(test_work_factor().unwrap_or(SCRYPT_WORK_FACTOR));
     let enc = age::Encryptor::with_recipients(std::iter::once(&rec as &dyn age::Recipient))
         .map_err(|e| VaultError::Crypto(e.to_string()))?;
     let mut out = Vec::with_capacity(plain.len() + 512);
@@ -430,7 +447,17 @@ pub fn save(path: &Path, passphrase: &SecretString, data: &VaultData) -> Result<
         .ok_or_else(|| VaultError::Io(std::io::Error::other("vault path has no parent")))?;
     crate::config::ensure_private_dir(dir)
         .map_err(|e| VaultError::Io(std::io::Error::other(e.to_string())))?;
+    // Refuse, before anything is written, a vault that couldn't be loaded
+    // again: the existing vault file stays untouched.
+    if data.entries.len() > MAX_ENTRIES {
+        return Err(VaultError::TooLarge(format!(
+            "a vault can hold at most {MAX_ENTRIES} aliases"
+        )));
+    }
     let plain = data.encode();
+    if plain.len() > MAX_PLAINTEXT {
+        return Err(VaultError::TooLarge("the vault would be too large".into()));
+    }
     let cipher = encrypt(&plain, passphrase)?;
     drop(plain);
 
@@ -818,5 +845,36 @@ mod tests {
         assert!(d.has_group("new"));
         assert_eq!(d.groups()["new"], 0);
         assert!(d.set_default_group("").is_err());
+    }
+
+    #[test]
+    fn save_refuses_a_vault_that_could_not_be_loaded_again() {
+        std::env::set_var("TACITTY_TEST_WORK_FACTOR", "8");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v").join("vault.age");
+        let pw = SecretString::from("pw".to_string());
+        create(&path, &pw).unwrap();
+        let before = fs::read(&path).unwrap();
+        let mut data = VaultData::new();
+        for i in 0..=MAX_ENTRIES {
+            data.put(&format!("a{i}"), b"s");
+        }
+        let err = save(&path, &pw, &data).unwrap_err().to_string();
+        assert!(
+            err.contains("at most") && err.contains("nothing was changed"),
+            "{err}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), before, "vault must be untouched");
+    }
+
+    #[test]
+    fn decode_rejects_bad_alias_names_and_duplicates() {
+        let mut data = VaultData::new();
+        data.put("good", b"s");
+        let mut bytes = data.encode().to_vec();
+        // Corrupt the alias name in place ("good" -> "-ood").
+        let at = bytes.windows(4).position(|w| w == b"good").unwrap();
+        bytes[at] = b'-';
+        assert!(VaultData::decode(&bytes).is_err());
     }
 }

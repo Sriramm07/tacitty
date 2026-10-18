@@ -6,13 +6,15 @@ targets = [
     "x86_64-unknown-linux-musl",
     "aarch64-unknown-linux-gnu",
     "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
 ]
 
 [advisories]
 version = 2
 ignore = [
     # `rsa` (pulled in by age's "ssh" feature, used only by `tacitty
-    # export --to ssh-rsa ...` / `tacitty import -i id_rsa`) has no fixed
+    # export --with-key ssh-rsa ...` / `tacitty import -i id_rsa`) has no fixed
     # release for the Marvin timing attack. Exploiting it needs an attacker
     # who can make the victim run many RSA decryptions and time each one
     # precisely, i.e. a network-facing decryption oracle. tacitty does at

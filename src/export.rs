@@ -482,6 +482,15 @@ pub fn decode_cxf(plain: &[u8]) -> Result<Decoded, ExportError> {
         .accounts
         .iter()
         .flat_map(|a| a.items.iter().map(move |i| (a.id.as_str(), i)));
+    let total: usize = header.accounts.iter().map(|a| a.items.len()).sum();
+    if total > vault::MAX_ENTRIES {
+        return Err(ExportError::Format(format!(
+            "the file holds {total} items; at most {} can be imported",
+            vault::MAX_ENTRIES
+        )));
+    }
+    let mut seen_aliases: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut seen_bad: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (account, item) in items {
         let title = display_title(&item.title);
         let mut skip = |reason: String| {
@@ -524,7 +533,7 @@ pub fn decode_cxf(plain: &[u8]) -> Result<Decoded, ExportError> {
             skip(format!("its password can't be used: {e}"));
             continue;
         }
-        if out.items.iter().any(|i| i.alias == item.title) {
+        if !seen_aliases.insert(item.title.as_str()) {
             skip("appears more than once in the file (kept the first)".into());
             continue;
         }
@@ -532,7 +541,7 @@ pub fn decode_cxf(plain: &[u8]) -> Result<Decoded, ExportError> {
             Some(c) if group::is_valid(c) => Some(c.to_string()),
             Some(c) => {
                 let shown = display_title(c);
-                if !out.bad_collections.contains(&shown) {
+                if seen_bad.insert(shown.clone()) {
                     out.bad_collections.push(shown);
                 }
                 None
@@ -722,6 +731,23 @@ pub fn parse_recipients(text: &str, source: &str) -> Result<Vec<BoxedRecipient>,
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
+        // Name the line, but never quote a line that isn't recognisably a
+        // public key: pointed at the wrong file, it could be anything.
+        if looks_private(line) {
+            return Err(format!("{source}, line {}: {PRIVATE_KEY_GIVEN}", n + 1));
+        }
+        let first = line.split_whitespace().next().unwrap_or("");
+        // age keys, and every OpenSSH public key type (supported or not, so
+        // unsupported ones get their specific message from parse_recipient).
+        if !["age1", "ssh-", "ecdsa-", "sk-"]
+            .iter()
+            .any(|p| first.starts_with(p))
+        {
+            return Err(format!(
+                "{source}, line {}: not a public key (expected age1..., ssh-ed25519 or ssh-rsa)",
+                n + 1
+            ));
+        }
         out.push(parse_recipient(line).map_err(|e| format!("{source}, line {}: {e}", n + 1))?);
     }
     if out.is_empty() {
@@ -887,9 +913,7 @@ pub fn encrypt(plain: &[u8], protection: &Protection, armor: bool) -> Result<Vec
         Protection::Passphrase(p) => {
             let mut r =
                 age::scrypt::Recipient::new(SecretString::from(p.expose_secret().to_string()));
-            if let Some(n) = vault::test_work_factor() {
-                r.set_work_factor(n);
-            }
+            r.set_work_factor(vault::test_work_factor().unwrap_or(vault::SCRYPT_WORK_FACTOR));
             scrypt = r;
             vec![&scrypt]
         }
@@ -962,7 +986,9 @@ pub fn decrypt_with_passphrase(
 ) -> Result<SecretBuf, ExportError> {
     let mut id =
         age::scrypt::Identity::new(SecretString::from(passphrase.expose_secret().to_string()));
-    id.set_max_work_factor(22);
+    // An export file is untrusted input: cap the scrypt cost it can demand
+    // (20 = about 1 GiB of memory). Real exports use SCRYPT_WORK_FACTOR (18).
+    id.set_max_work_factor(20);
     decrypt(cipher, std::iter::once(&id as &dyn age::Identity))
 }
 
@@ -1394,7 +1420,11 @@ mod tests {
             .err()
             .unwrap();
         assert!(err.contains("team.keys, line 3"), "{err}");
-        assert!(err.contains("not an age key"), "{err}");
+        assert!(err.contains("not a public key"), "{err}");
+        assert!(
+            !err.contains("not-a-key"),
+            "line content must not be quoted: {err}"
+        );
 
         assert!(parse_recipients("# nothing\n\n", "empty.keys")
             .err()
@@ -1776,5 +1806,13 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(missing.contains("reading"), "{missing}");
+    }
+
+    #[test]
+    fn import_refuses_more_items_than_a_vault_can_hold() {
+        let item = r#"{"id":"","title":"x","credentials":[]}"#;
+        let items = vec![item; vault::MAX_ENTRIES + 1].join(",");
+        let err = decode_cxf(&doc(&items)).err().unwrap().to_string();
+        assert!(err.contains("at most"), "{err}");
     }
 }

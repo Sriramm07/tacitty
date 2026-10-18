@@ -124,7 +124,9 @@ fn prompt_passphrase_and_unlock(resolver: &mut Resolver) -> Result<bool, String>
     if pass_bytes.is_empty() {
         return Ok(false);
     }
-    let pass = SecretString::from(String::from_utf8_lossy(pass_bytes.as_slice()).into_owned());
+    let text = std::str::from_utf8(pass_bytes.as_slice())
+        .map_err(|_| "the passphrase is not valid UTF-8 text".to_string())?;
+    let pass = SecretString::from(text.to_string());
     resolver.unlock(&pass).map(|_| true)
 }
 

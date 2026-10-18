@@ -225,7 +225,7 @@ fn window_resize_propagates_to_child() {
     let mut p = env.spawn_shell(15_000);
     p.send_line(
         "python3 -c \"import fcntl,termios,struct; \
-         print(struct.unpack('hh', fcntl.ioctl(0, termios.TIOCGWINSZ, b'0000'))[0:2])\"",
+         print(struct.unpack('hhhh', fcntl.ioctl(0, termios.TIOCGWINSZ, bytes(8)))[0:2])\"",
     )
     .unwrap();
     p.exp_string("(24, 80)").unwrap();
@@ -243,7 +243,7 @@ fn window_resize_propagates_to_child() {
 
     p.send_line(
         "python3 -c \"import fcntl,termios,struct; \
-         print(struct.unpack('hh', fcntl.ioctl(0, termios.TIOCGWINSZ, b'0000'))[0:2])\"",
+         print(struct.unpack('hhhh', fcntl.ioctl(0, termios.TIOCGWINSZ, bytes(8)))[0:2])\"",
     )
     .unwrap();
     p.exp_string("(40, 100)").unwrap();

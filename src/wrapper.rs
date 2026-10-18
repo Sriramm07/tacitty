@@ -258,6 +258,31 @@ fn capture_still_valid(
     }
 }
 
+/// The parts of a window size that matter, comparable (`libc::winsize`
+/// isn't `PartialEq` without extra libc features).
+fn ws_key(ws: libc::winsize) -> (u16, u16, u16, u16) {
+    (ws.ws_row, ws.ws_col, ws.ws_xpixel, ws.ws_ypixel)
+}
+
+/// Copy the real terminal's size to the child's pty and tell the child, if
+/// it changed since `last` (or always, when `force`).
+fn sync_winsize(
+    master_fd: RawFd,
+    child_pid: i32,
+    last: &mut Option<(u16, u16, u16, u16)>,
+    force: bool,
+) {
+    let Ok(ws) = sys::get_winsize(0) else {
+        return;
+    };
+    if !force && *last == Some(ws_key(ws)) {
+        return;
+    }
+    *last = Some(ws_key(ws));
+    let _ = sys::set_winsize(master_fd, &ws);
+    let _ = sys::kill(child_pid, libc::SIGWINCH);
+}
+
 fn report_not_sent() {
     ring_local_bell();
     write_stdout(b"\r\ntacitty: the password prompt changed, so nothing was sent\r\n");
@@ -307,6 +332,7 @@ pub fn run(cfg: Config, options: RunOptions) -> anyhow::Result<i32> {
     // handler would have been lost (the default action ignores it), leaving
     // the pty at a stale size. Now that later resizes are caught, apply the
     // current size once.
+    let mut last_ws = sys::get_winsize(0).ok().map(ws_key);
     if let Ok(ws) = sys::get_winsize(0) {
         let _ = sys::set_winsize(master_fd, &ws);
     }
@@ -387,10 +413,7 @@ pub fn run(cfg: Config, options: RunOptions) -> anyhow::Result<i32> {
                 }
             }
             if winch {
-                if let Ok(ws) = sys::get_winsize(0) {
-                    let _ = sys::set_winsize(master_fd, &ws);
-                    let _ = sys::kill(child_pid, libc::SIGWINCH);
-                }
+                sync_winsize(master_fd, child_pid, &mut last_ws, true);
             }
             if chld {
                 match child.try_wait() {
@@ -446,6 +469,11 @@ pub fn run(cfg: Config, options: RunOptions) -> anyhow::Result<i32> {
 
         // --- local input -------------------------------------------------
         if fds[0].revents & libc::POLLIN != 0 {
+            // Fallback for a lost SIGWINCH (some environments don't deliver
+            // it reliably, e.g. seen on macOS under test harnesses): before
+            // passing keystrokes on, make sure the child has the current
+            // size. One ioctl per read, and a no-op unless it changed.
+            sync_winsize(master_fd, child_pid, &mut last_ws, false);
             let mut buf = [0u8; 256];
             match sys::read_once(0, &mut buf) {
                 Ok(0) => { /* local stdin EOF; keep proxying child output */ }

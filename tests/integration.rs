@@ -237,8 +237,7 @@ fn window_resize_propagates_to_child() {
         ws_ypixel: 0,
     };
     use std::os::fd::AsRawFd;
-    let f = p.process().get_file_handle().unwrap();
-    tacitty::sys::set_winsize(f.as_raw_fd(), &ws).unwrap();
+    tacitty::sys::set_winsize(p.process().pty.as_raw_fd(), &ws).unwrap();
     let _ = tacitty::sys::kill(p.process().child_pid.as_raw(), libc::SIGWINCH);
 
     p.send_line(

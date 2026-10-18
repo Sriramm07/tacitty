@@ -70,16 +70,16 @@ impl Env {
         cmd.env("SHELL", "/bin/bash");
         cmd.env("PS1", "TESTPROMPT$ ");
         let mut p = spawn_command(cmd, Some(timeout_ms)).expect("spawn tacitty shell");
-        if let Ok(f) = p.process().get_file_handle() {
-            let ws = libc::winsize {
-                ws_row: 24,
-                ws_col: 80,
-                ws_xpixel: 0,
-                ws_ypixel: 0,
-            };
-            if let Err(e) = tacitty::sys::set_winsize(f.as_raw_fd(), &ws) {
-                eprintln!("note: setting the test pty's window size failed: {e}");
-            }
+        let ws = libc::winsize {
+            ws_row: 24,
+            ws_col: 80,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        // On the pty master itself: on macOS, ioctls on the dup'ed handle
+        // from `get_file_handle()` fail with ENOTTY.
+        if let Err(e) = tacitty::sys::set_winsize(p.process().pty.as_raw_fd(), &ws) {
+            eprintln!("note: setting the test pty's window size failed: {e}");
         }
         p.send_line("PS1='TESTPROMPT$ '").ok();
         p.exp_string("TESTPROMPT$ ").expect("initial prompt");

@@ -76,10 +76,19 @@ impl Env {
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
-        // On the pty master itself: on macOS, ioctls on the dup'ed handle
-        // from `get_file_handle()` fail with ENOTTY.
-        if let Err(e) = tacitty::sys::set_winsize(p.process().pty.as_raw_fd(), &ws) {
-            eprintln!("note: setting the test pty's window size failed: {e}");
+        // macOS refuses ioctls on a pty master (ENOTTY) until the other side
+        // has been opened, which the just-spawned child may not have done
+        // yet, so retry for a moment.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match tacitty::sys::set_winsize(p.process().pty.as_raw_fd(), &ws) {
+                Ok(()) => break,
+                Err(e) if std::time::Instant::now() >= deadline => {
+                    eprintln!("note: setting the test pty's window size failed: {e}");
+                    break;
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
         }
         p.send_line("PS1='TESTPROMPT$ '").ok();
         p.exp_string("TESTPROMPT$ ").expect("initial prompt");

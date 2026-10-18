@@ -55,3 +55,44 @@ report.append(f"$ tacitty status -> {st.returncode}\n{st.stdout}{st.stderr}\n")
 report.append("runtime dir listing:\n" + subprocess.run(["ls", "-laR", run], capture_output=True, text=True).stdout)
 open(os.path.join(out_dir, "agent-diag.txt"), "w").write("\n".join(report))
 print("\n".join(report))
+
+# --- window size diagnostics ------------------------------------------------
+import fcntl, struct, termios
+lines = []
+m, sl = pty.openpty()
+try:
+    fcntl.ioctl(m, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+    lines.append("set size on plain pty master: ok")
+except OSError as e:
+    lines.append(f"set size on plain pty master: FAILED {e}")
+lines.append("slave sees: %r" % (struct.unpack("HHHH", fcntl.ioctl(sl, termios.TIOCGWINSZ, bytes(8)))[:2],))
+os.close(m); os.close(sl)
+
+pid, fd = pty.fork()
+if pid == 0:
+    os.execve(binp, [binp, "shell", "--", "python3", "-c",
+                     "import time,fcntl,termios,struct; time.sleep(2); "
+                     "print('INNER', struct.unpack('HHHH', fcntl.ioctl(0, termios.TIOCGWINSZ, bytes(8)))[:2])"],
+              dict(env, SHELL="/bin/bash"))
+time.sleep(0.5)
+try:
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+    lines.append("set size on tacitty's pty master: ok")
+except OSError as e:
+    lines.append(f"set size on tacitty's pty master: FAILED {e}")
+out = b""
+end = time.time() + 6
+while time.time() < end:
+    r, _, _ = select.select([fd], [], [], 0.1)
+    if r:
+        try:
+            out += os.read(fd, 4096)
+        except OSError:
+            break
+lines.append("tacitty shell inner output: %r" % out.decode(errors="replace")[-200:])
+try:
+    os.waitpid(pid, 0)
+except ChildProcessError:
+    pass
+open(os.path.join(out_dir, "winsize-diag.txt"), "w").write("\n".join(lines) + "\n")
+print("\n".join(lines))

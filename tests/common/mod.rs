@@ -77,7 +77,9 @@ impl Env {
                 ws_xpixel: 0,
                 ws_ypixel: 0,
             };
-            let _ = tacitty::sys::set_winsize(f.as_raw_fd(), &ws);
+            if let Err(e) = tacitty::sys::set_winsize(f.as_raw_fd(), &ws) {
+                eprintln!("note: setting the test pty's window size failed: {e}");
+            }
         }
         p.send_line("PS1='TESTPROMPT$ '").ok();
         p.exp_string("TESTPROMPT$ ").expect("initial prompt");

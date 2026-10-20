@@ -36,6 +36,10 @@ surfers. taciTTY lets you type a short, memorable alias instead. It works at
 - ⚡ **Quick to set up.** One self-contained binary. `tacitty init` turns it
   on for every new terminal automatically.
 
+> 🤨 **Skeptical? Good. You should be.** A tool that sits between your
+> keyboard and your passwords deserves hard questions.
+> **[Is this safe? (the FAQ for the suspicious) →](docs/FAQ.md)**
+
 ## 🚀 Quick start
 
 ```sh
@@ -139,6 +143,8 @@ refused from every backend.
 
 The [taciTTY guide](docs/GUIDE.md) covers everything else:
 
+- [**Is this safe?**](docs/FAQ.md): straight answers for the suspicious
+
 - [**Install**](docs/GUIDE.md#install): the installer, verifying downloads, updating
 - [**How it works**](docs/GUIDE.md#how-it-works): how password prompts are detected, locally and over SSH
 - [**Auto-start**](docs/GUIDE.md#auto-start): what `tacitty init` changes, and how to switch it off
@@ -155,3 +161,7 @@ taciTTY is free and open source, licensed under either of
 
 - [MIT license](LICENSE-MIT), or
 - [Apache License, Version 2.0](LICENSE-APACHE)
+
+---
+
+<sub>Built with AI assistance (Claude).</sub>

@@ -144,7 +144,6 @@ refused from every backend.
 The [taciTTY guide](docs/GUIDE.md) covers everything else:
 
 - [**Is this safe?**](docs/FAQ.md): straight answers for the suspicious
-
 - [**Install**](docs/GUIDE.md#install): the installer, verifying downloads, updating
 - [**How it works**](docs/GUIDE.md#how-it-works): how password prompts are detected, locally and over SSH
 - [**Auto-start**](docs/GUIDE.md#auto-start): what `tacitty init` changes, and how to switch it off

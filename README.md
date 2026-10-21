@@ -94,6 +94,8 @@ Is one of your *real* passwords starting with `@`? Type `@@` for a literal
 | `tacitty update [--check]` | Update to the latest release |
 | `tacitty doctor` | Check that everything is set up correctly |
 | `tacitty config` | Print the config file path |
+| `tacitty completions <bash\|zsh\|fish>` | Print a shell completion script to stdout |
+| `tacitty man` | Print the man page (roff) to stdout |
 
 Alias names: letters, digits, `.`, `_`, `/` and `-`, up to 64 characters,
 starting with a letter or digit. Group names follow the same rules,
@@ -154,6 +156,7 @@ The [taciTTY guide](docs/GUIDE.md) covers everything else:
 - [**Running a command with an alias**](docs/GUIDE.md#run): `tacitty run` for tools that only take a password on the command line, and what it does and doesn't hide
 - [**Sharing aliases securely**](docs/GUIDE.md#sharing): giving colleagues the same aliases with `tacitty export` / `import`
 - [**Security**](docs/GUIDE.md#security): threat model, protections and known limitations
+- [**Shell completions and man page**](docs/GUIDE.md#completions): tab-completion for bash/zsh/fish, and `man tacitty`
 - [**Development**](docs/GUIDE.md#development): building, testing and releasing
 
 <a id="license"></a>

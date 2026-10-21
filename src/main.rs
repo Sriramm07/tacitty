@@ -3,7 +3,7 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use secrecy::SecretString;
 
 use tacitty::agent::{self, Client};
@@ -54,7 +54,12 @@ fn stdout_failed(e: std::io::Error) -> ! {
 #[command(
     name = "tacitty",
     version,
-    about = "Prompt-aware password alias injector for Linux and macOS terminals"
+    about = "Prompt-aware password alias injector for Linux and macOS terminals",
+    long_about = "taciTTY lets you type @alias at a terminal password prompt and have the \
+real secret sent in its place. The secret is read from a local, encrypted vault and is \
+only substituted while the terminal is hiding what you type, so an alias stays plain text \
+on normal command lines, in editors and in pagers. Nothing leaves your machine: there is \
+no server, no clipboard and no keystroke injection."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -216,6 +221,25 @@ CXF JSON.")]
     Doctor,
     /// Print the config file path.
     Config,
+    /// Print a shell completion script to stdout (bash, zsh or fish).
+    #[command(after_help = "\
+Install the script where your shell looks for completions, e.g.
+  bash:  tacitty completions bash > ~/.local/share/bash-completion/completions/tacitty
+  zsh:   tacitty completions zsh  > ~/.zfunc/_tacitty   (with ~/.zfunc on $fpath)
+  fish:  tacitty completions fish > ~/.config/fish/completions/tacitty.fish
+Packages (Homebrew, the Arch package) install them for you. See
+docs/GUIDE.md#completions.")]
+    Completions {
+        /// Shell to generate completions for: bash, zsh or fish.
+        #[arg(value_name = "SHELL")]
+        shell: clap_complete::Shell,
+    },
+    /// Print the man page (roff) for tacitty to stdout.
+    #[command(after_help = "\
+The page is generated from the live command set, so it always matches this
+build. Packages install it as tacitty(1); otherwise view it with
+  tacitty man > ~/.local/share/man/man1/tacitty.1 && man tacitty")]
+    Man,
 }
 
 #[derive(Subcommand)]
@@ -306,6 +330,8 @@ fn main() -> Result<()> {
         Cmd::Status => cmd_status(),
         Cmd::Doctor => cmd_doctor(),
         Cmd::Config => cmd_config_path(),
+        Cmd::Completions { shell } => cmd_completions(shell),
+        Cmd::Man => cmd_man(),
     }?;
     std::process::exit(code);
 }
@@ -1338,3 +1364,102 @@ fn cmd_config_path() -> Result<i32> {
     outln!("{}", config::config_path()?.display());
     Ok(0)
 }
+
+/// Write bytes to stdout with the same broken-pipe handling as [`out!`]
+/// (used for the completion script and man page, which are built into a
+/// buffer first so a closed pipe ends the program quietly).
+fn write_stdout(bytes: &[u8]) -> Result<i32> {
+    if let Err(e) = std::io::stdout().write_all(bytes) {
+        stdout_failed(e);
+    }
+    Ok(0)
+}
+
+/// Generate a completion script for `shell` from the live CLI, so it always
+/// matches the real commands and flags (new subcommands included).
+fn cmd_completions(shell: clap_complete::Shell) -> Result<i32> {
+    let mut cmd = Cli::command();
+    let mut buf = Vec::new();
+    clap_complete::generate(shell, &mut cmd, "tacitty", &mut buf);
+    write_stdout(&buf)
+}
+
+/// Render the roff man page for the whole CLI from the live command set.
+fn cmd_man() -> Result<i32> {
+    write_stdout(&render_man()?)
+}
+
+/// Build the man page: the auto-generated title/synopsis/options/subcommands
+/// from clap_mangen, with hand-written FILES/ENVIRONMENT/EXAMPLES/SECURITY/
+/// SEE ALSO sections slotted in after the subcommands. Nothing here is
+/// committed as a file — it would go stale as the CLI changes.
+fn render_man() -> Result<Vec<u8>> {
+    let man = clap_mangen::Man::new(Cli::command());
+    let mut buf: Vec<u8> = Vec::new();
+    man.render_title(&mut buf)?;
+    man.render_name_section(&mut buf)?;
+    man.render_synopsis_section(&mut buf)?;
+    man.render_description_section(&mut buf)?;
+    man.render_options_section(&mut buf)?;
+    man.render_subcommands_section(&mut buf)?;
+    buf.extend_from_slice(MAN_EXTRA_SECTIONS.as_bytes());
+    man.render_version_section(&mut buf)?;
+    Ok(buf)
+}
+
+/// Hand-written roff appended after the generated SUBCOMMANDS section.
+/// Literal hyphens are escaped (`\-`) so they survive copy-paste and aren't
+/// treated as hyphenation points.
+const MAN_EXTRA_SECTIONS: &str = r#".SH FILES
+.TP
+.I ~/.local/share/tacitty/vault.age
+The encrypted vault (an age file, scrypt passphrase, mode 0600).
+.TP
+.I ~/.config/tacitty/config.toml
+Optional configuration (trigger character, backend, idle lock, remote prompts).
+.TP
+.I $XDG_RUNTIME_DIR/tacitty/
+Directory holding the per\-user agent socket.
+.SH ENVIRONMENT
+.TP
+.B NO_TACITTY
+If set, a shell started with auto\-start on does not re\-enter the wrapper.
+.TP
+.B TACITTY_ACTIVE
+Set inside the wrapper to the wrapped terminal's device path (e.g. /dev/pts/3);
+new terminals use it to tell they are not yet wrapped.
+.TP
+.B TACITTY_LOG
+Path for a state\-transition log of fixed labels only \(em never input,
+aliases or secrets.
+.SH EXAMPLES
+.TP
+.B tacitty init
+Create the vault, set the master passphrase, and turn on auto\-start.
+.TP
+.B tacitty add prod\-db
+Store a secret under the alias \fBprod\-db\fR.
+.TP
+.B sudo systemctl restart nginx
+At \fB[sudo] password for user:\fR type \fB@prod\-db\fR and the real secret is sent.
+.TP
+.B tacitty add web \-\-group prod
+Store a secret and put the alias in the \fBprod\fR group.
+.TP
+.B tacitty export \-\-group prod \-\-with\-key alice.pub \-o prod.tacitty
+Share the \fBprod\fR group, encrypted to a colleague's public key.
+.TP
+.B tacitty run swaks \-\-auth\-password @smtp
+Run a command, expanding \fB@smtp\fR at its password prompt.
+.SH SECURITY
+A secret is only written while the terminal is hiding input (or at a detected
+remote prompt), and that is re\-checked at the moment of sending. For the threat
+model and the "Is this safe?" FAQ, see
+.UR https://github.com/Sriramm07/tacitty
+the project page.
+.UE
+.SH SEE ALSO
+.BR age (1),
+.BR ssh (1),
+.BR sudo (8)
+"#;

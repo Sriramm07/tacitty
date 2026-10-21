@@ -3,6 +3,7 @@
 [← Back to the README](../README.md)
 
 - [Install](#install)
+- [Shell completions and man page](#completions)
 - [How it works](#how-it-works)
 - [Auto-start](#auto-start)
 - [Groups](#groups)
@@ -65,6 +66,45 @@ built from this repository by its release workflow. With the
 
 ```sh
 gh attestation verify tacitty-v0.1.0-x86_64-unknown-linux-musl.tar.gz --repo Sriramm07/tacitty
+```
+
+<a id="completions"></a>
+
+## ⌨️ Shell completions and man page
+
+taciTTY can print its own shell completions and man page, both generated from
+the live command set, so they always match the version you have installed.
+
+**Installed for you.** Packages install both automatically: the Homebrew
+formula and the Arch package drop the man page into the system `man` path and
+the completion scripts where bash, zsh and fish look for them. After a package
+install, `man tacitty` works and tab-completion is active in new shells.
+
+**Installing completions by hand** (for the `curl … | sh` installer, which
+ships only the binary):
+
+```sh
+# bash
+tacitty completions bash > ~/.local/share/bash-completion/completions/tacitty
+
+# zsh — write it to a directory on your $fpath, e.g. ~/.zfunc
+mkdir -p ~/.zfunc
+tacitty completions zsh > ~/.zfunc/_tacitty
+# then, in ~/.zshrc (before `compinit`): fpath=(~/.zfunc $fpath)
+
+# fish
+tacitty completions fish > ~/.config/fish/completions/tacitty.fish
+```
+
+Open a new shell afterwards. The accepted shells are `bash`, `zsh` and `fish`.
+
+**The man page.** After a package install, just run `man tacitty`. Otherwise
+write it somewhere on your `MANPATH`:
+
+```sh
+mkdir -p ~/.local/share/man/man1
+tacitty man > ~/.local/share/man/man1/tacitty.1
+man tacitty
 ```
 
 <a id="how-it-works"></a>

@@ -12,4 +12,10 @@ ignore = [
     # encrypting to an RSA public key involves no private-key operation.
     # Re-check when age moves to rsa 0.10.
     "RUSTSEC-2023-0071",
+    # basic-toml (RUSTSEC-2026-0374): unmaintained, not a vulnerability. A
+    # build-time-only transitive dependency of age's i18n stack
+    # (age -> i18n-embed-fl -> i18n-config), with no safe upgrade available
+    # and never called by tacitty directly. Mirrors deny.toml. Re-check when
+    # age / i18n-config move off basic-toml.
+    "RUSTSEC-2026-0374",
 ]

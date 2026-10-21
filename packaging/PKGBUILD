@@ -38,6 +38,20 @@ package() {
     cd "$pkgname-$pkgver"
     install -Dm755 "target/release/$pkgname" "$pkgdir/usr/bin/$pkgname"
     install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+
+    # Man page and shell completions, generated from the just-built binary so
+    # they always match this version's command set.
+    "target/release/$pkgname" man > "$pkgname.1"
+    install -Dm644 "$pkgname.1" "$pkgdir/usr/share/man/man1/$pkgname.1"
+    "target/release/$pkgname" completions bash > "$pkgname.bash"
+    install -Dm644 "$pkgname.bash" \
+        "$pkgdir/usr/share/bash-completion/completions/$pkgname"
+    "target/release/$pkgname" completions zsh > "_$pkgname"
+    install -Dm644 "_$pkgname" "$pkgdir/usr/share/zsh/site-functions/_$pkgname"
+    "target/release/$pkgname" completions fish > "$pkgname.fish"
+    install -Dm644 "$pkgname.fish" \
+        "$pkgdir/usr/share/fish/vendor_completions.d/$pkgname.fish"
+
     install -Dm644 contrib/bashrc-snippet.sh \
         "$pkgdir/usr/share/doc/$pkgname/contrib/bashrc-snippet.sh"
     install -Dm644 contrib/tacitty.tmux.conf \

@@ -1402,3 +1402,55 @@ fn run_prompts_for_the_passphrase_when_the_vault_is_locked() {
     let argv = std::fs::read_to_string(&out).unwrap();
     assert_eq!(argv, "s3cr3t!\n", "child argv was {argv:?}");
 }
+
+// Completions and the man page are generated from the live CLI and need no
+// vault or agent, so these just run the binary and check its stdout.
+
+#[test]
+fn completions_generate_a_script_for_each_shell() {
+    let env = Env::fresh();
+    for shell in ["bash", "zsh", "fish"] {
+        let out = env.command(&["completions", shell]).output().unwrap();
+        assert!(
+            out.status.success(),
+            "`tacitty completions {shell}` exited non-zero: {out:?}"
+        );
+        let script = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            !script.trim().is_empty(),
+            "`tacitty completions {shell}` printed nothing"
+        );
+        assert!(
+            script.contains("tacitty"),
+            "`tacitty completions {shell}` script never mentions tacitty"
+        );
+    }
+}
+
+#[test]
+fn completions_reject_an_unknown_shell() {
+    let env = Env::fresh();
+    let out = env.command(&["completions", "smalltalk"]).output().unwrap();
+    assert!(
+        !out.status.success(),
+        "an unknown shell should be rejected, not accepted"
+    );
+}
+
+#[test]
+fn man_page_is_roff_with_our_sections() {
+    let env = Env::fresh();
+    let out = env.command(&["man"]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "`tacitty man` exited non-zero: {out:?}"
+    );
+    let page = String::from_utf8_lossy(&out.stdout);
+    // A real man page: the title header, the program name, and the
+    // hand-written sections we append after the generated ones.
+    assert!(page.contains(".TH"), "man page has no .TH title header");
+    assert!(page.contains("TACITTY"), "man page never mentions TACITTY");
+    for section in [".SH FILES", ".SH ENVIRONMENT", ".SH EXAMPLES"] {
+        assert!(page.contains(section), "man page is missing {section}");
+    }
+}

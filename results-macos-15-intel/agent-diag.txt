@@ -1,0 +1,53 @@
+$ tacitty init --no-autostart -> status 0
+New master passphrase: 
+
+Confirm master passphrase: 
+
+Created vault at /var/folders/20/jp1_0n3n7kndh6rnbqb5344m0000gn/T/tdiag3158yzgp/home/.local/share/tacitty/vault.age
+Run `tacitty add <alias>` to store your first secret.
+
+
+agent processes:
+
+
+$ tacitty add x -> status 0
+Secret: 
+
+Confirm secret: 
+
+Master passphrase: 
+
+Saved @x in group default.
+
+
+agent processes:
+
+
+$ tacitty unlock -> status 0
+Master passphrase: 
+
+Unlocked.
+
+
+agent processes:
+ 9200     1  9200      0 ??       S<s  /Users/runner/work/tacitty/tacitty/target/debug/tacitty agent --foreground-daemonized
+
+after 2s:
+ 9200     1  9200      0 ??       S<s  /Users/runner/work/tacitty/tacitty/target/debug/tacitty agent --foreground-daemonized
+
+$ tacitty status -> 0
+unlocked (idle 4s, auto-lock after 15m)
+
+
+runtime dir listing:
+total 0
+drwxr-xr-x  3 runner  staff   96 Oct 21 14:07 .
+drwx------  4 runner  staff  128 Oct 21 14:07 ..
+drwx------  4 runner  staff  128 Oct 21 14:07 tacitty
+
+/var/folders/20/jp1_0n3n7kndh6rnbqb5344m0000gn/T/tdiag3158yzgp/run/tacitty:
+total 0
+drwx------  4 runner  staff  128 Oct 21 14:07 .
+drwxr-xr-x  3 runner  staff   96 Oct 21 14:07 ..
+-rw-------  1 runner  staff    0 Oct 21 14:07 agent-2.lock
+srw-------  1 runner  staff    0 Oct 21 14:07 agent-2.sock

@@ -1,0 +1,5 @@
+PASS build
+PASS unit-tests
+PASS integration-tests
+PASS doctor
+PASS agent-diagnostics

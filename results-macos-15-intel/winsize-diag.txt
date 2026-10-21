@@ -1,0 +1,4 @@
+set size on plain pty master: ok
+slave sees: (24, 80)
+set size on tacitty's pty master: ok
+tacitty shell inner output: 'INNER (24, 80)\r\n'

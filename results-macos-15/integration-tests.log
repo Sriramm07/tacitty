@@ -1,0 +1,55 @@
+   Compiling tacitty v0.1.0 (/Users/runner/work/tacitty/tacitty)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.73s
+     Running tests/integration.rs (target/debug/deps/integration-102282e0f3ce1327)
+
+running 47 tests
+test a_terminal_inside_a_wrapped_terminal_is_wrapped_too ... ok
+test add_and_ls_by_group ... ok
+test alias_after_ctrl_c_at_prompt_is_not_sent_to_shell ... ok
+test alias_resolves_after_moving_between_groups ... ok
+test aliases_keep_working_after_the_agent_connection_goes_idle ... ok
+test alternate_screen_program_never_enters_secret_mode ... ok
+test broken_wrapper_falls_back_to_plain_shell ... ok
+test completions_generate_a_script_for_each_shell ... ok
+test completions_reject_an_unknown_shell ... ok
+test ctrl_c_at_passphrase_prompt_restores_echo ... ok
+test ctrl_c_during_capture_discards_and_forwards_sigint ... ok
+test double_at_sends_literal_at ... ok
+test exit_status_propagates ... ok
+test export_refuses_short_passphrase_and_existing_file ... ok
+test export_to_ssh_key_imports_with_default_identity ... ok
+test exported_alias_resolves_after_import_elsewhere ... ok
+test exported_groups_survive_import ... ok
+test getpass_prompt_gets_the_real_secret ... ok
+test group_move_rename_rm_and_default ... ok
+test import_skips_existing_aliases_unless_overwrite ... ok
+test init_creates_vault_with_safe_permissions ... ok
+test init_enables_autostart_and_new_shells_are_wrapped ... ok
+test locked_vault_prompts_inline_and_then_delivers ... ok
+test long_multibyte_output_line_does_not_crash ... ok
+test longest_allowed_secret_is_delivered_whole ... ok
+test man_page_is_roff_with_our_sections ... ok
+test mv_refuses_to_overwrite_an_existing_alias ... ok
+test nesting_guard_execs_plain_shell_instead_of_double_wrapping ... ok
+test no_tacitty_skips_autostart ... ok
+test normal_shell_line_passes_alias_through_literally ... ok
+test password_starting_with_at_and_space_passes_through_whole ... ok
+test prompt_timeout_during_alias_sends_nothing ... ok
+test read_s_prompt_gets_the_real_secret ... ok
+test remote_prompt_asks_first_in_confirm_mode ... ok
+test remote_prompt_sends_secret_without_confirmation_by_default ... ok
+test remote_prompt_with_local_echo_on_gets_no_secret ... ok
+test run_errors_on_an_unknown_alias_and_does_not_run_the_command ... ok
+test run_leaves_an_email_style_arg_untouched ... ok
+test run_passes_a_doubled_trigger_through_as_a_literal ... ok
+test run_prompts_for_the_passphrase_when_the_vault_is_locked ... ok
+test run_propagates_the_child_exit_status ... ok
+test run_substitutes_a_whole_arg_alias_into_the_child_argv ... ok
+test run_substitutes_the_flag_equals_alias_form ... ok
+test sigterm_restores_terminal_and_exits ... ok
+test tmux_panes_are_wrapped_automatically ... ok
+test unknown_alias_bells_and_does_not_submit ... ok
+test window_resize_propagates_to_child ... ok
+
+test result: ok. 47 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 158.98s
+

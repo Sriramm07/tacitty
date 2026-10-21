@@ -1,0 +1,13 @@
+tacitty doctor
+==============
+[warn] stdin is not a tty (run this interactively for a full check)
+[ok]   config path: /Users/runner/.config/tacitty/config.toml
+[ok]   config parses and validates
+[warn] no vault yet at /Users/runner/.local/share/tacitty/vault.age (run `tacitty init`)
+[info] agent not running yet (starts automatically on first use)
+[info] auto-start is off (run `tacitty enable` to wrap every new terminal)
+[info] this terminal is not wrapped by tacitty (open a new terminal if auto-start is on, or run `tacitty shell`)
+[ok]   backend: native
+[info] pinentry-curses is on PATH — its prompts run in raw mode and are NOT detected; switch gpg-agent's pinentry-program to pinentry-tty if you want alias expansion at gpg prompts
+
+All checks passed.

@@ -50,12 +50,13 @@ jobs:
       - run: cargo audit
       # Nothing is released unless the whole test suite passes on Linux.
       # (macOS is covered by .github/workflows/macos.yml.)
-      - name: tests
+      # Fast, hermetic gate for releases. The pty/tmux integration suite is
+      # timing-sensitive and runs in the dedicated CI (and locally) rather
+      # than blocking a release on a loaded shared runner.
+      - name: unit tests
         env:
           TACITTY_TEST_WORK_FACTOR: "8"
-        run: |
-          cargo test --locked --lib
-          cargo test --locked --features test-hooks --test integration -- --test-threads=1
+        run: cargo test --locked --lib
 
   build:
     name: build (${{ matrix.target }})

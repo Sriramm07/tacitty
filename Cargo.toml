@@ -11,6 +11,22 @@ license = "MIT OR Apache-2.0"
 readme = "README.md"
 keywords = ["password", "pty", "terminal", "sudo", "vault"]
 categories = ["command-line-utilities"]
+# Ship only what `cargo install tacitty` needs: the source, README and
+# licences. Repo-only material (the demo GIF, docs, CI, fuzzing, packaging,
+# contrib) is left out of the published crate.
+exclude = [
+    "/assets",
+    "/docs",
+    "/contrib",
+    "/packaging",
+    "/fuzz",
+    "/tests",
+    "/.github",
+    "/.cargo",
+    "/ci",
+    "/deny.toml",
+    "/install.sh",
+]
 
 [lib]
 name = "tacitty"

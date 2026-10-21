@@ -46,6 +46,12 @@ commands. A few things differ:
   `xattr -d com.apple.quarantine tacitty`.
 - The `secret-service` backend is Linux only.
 
+**Homebrew (macOS and Linux):**
+
+```sh
+brew install sriramm07/tap/tacitty
+```
+
 **Updating:** run `tacitty update`, or `tacitty update --check` to only see
 whether a newer version exists. It verifies the checksum and makes sure the
 new binary runs before replacing the old one.

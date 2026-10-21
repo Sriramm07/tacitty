@@ -22,6 +22,13 @@ ignore = [
     # an RSA public key involves no private-key operation at all.
     # Re-check when age moves to rsa 0.10.
     { id = "RUSTSEC-2023-0071", reason = "one-shot local RSA decryption is not a timing oracle; see comment" },
+    # `basic-toml` is unmaintained (archived March 2025). It is not a
+    # vulnerability, and it is pulled in only transitively, through age's
+    # localisation stack (age -> i18n-embed-fl -> i18n-config -> basic-toml),
+    # where it parses age's own bundled Fluent i18n config at build time. No
+    # safe upgrade is available, and tacitty never calls it directly.
+    # Re-check when age / i18n-config move off basic-toml.
+    { id = "RUSTSEC-2026-0374", reason = "unmaintained, build-time-only transitive dep of age's i18n stack; no safe upgrade" },
 ]
 
 [licenses]

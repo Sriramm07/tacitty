@@ -6,6 +6,7 @@
 - [How it works](#how-it-works)
 - [Auto-start](#auto-start)
 - [Groups](#groups)
+- [Running a command with an alias](#run)
 - [Sharing aliases securely](#sharing)
 - [Security](#security)
 - [Development](#development)
@@ -226,6 +227,56 @@ prod
 Like the other commands that change the vault, the group commands ask for
 your master passphrase and then lock the running agent, so it picks up the
 change the next time it's unlocked.
+
+<a id="run"></a>
+
+## 🏃 Running a command with an alias
+
+Some tools take a password straight on the command line, with no prompt —
+`swaks --auth-password ...`, a database client's `--password=...`, and so on.
+Typing the real password there puts it in your shell history, your terminal
+scrollback, and often your clipboard. `tacitty run` lets you type an alias
+instead:
+
+```sh
+tacitty run swaks --auth-password @smtp -tls --to you@example.com
+tacitty run mysql --host db --user app --password=@proddb
+```
+
+Before the command starts, taciTTY replaces each argument that is **exactly**
+`@alias` (or `--flag=@alias`) with the secret stored under that alias.
+Everything else — including the command's own flags like `-tls` above — is
+passed through untouched, and the command runs directly, never through a
+shell. Put `--` before the command if it begins with a dash
+(`tacitty run -- mycmd ...`).
+
+Only a whole argument that starts with the trigger is substituted, so
+ordinary text that merely contains `@` is left alone:
+
+- `@smtp` → the secret stored under `smtp`
+- `--password=@proddb` → `--password=` kept, the value replaced
+- `user@example.com`, `user@host:/path` → unchanged (not an alias)
+- `@@smtp` → the literal `@smtp`, with no lookup (the `@@` escape)
+
+An unknown alias stops `run` with an error before the command runs, so a
+typo never launches your tool with the alias name as its password. Use
+`@@name` (two triggers) when you really do want a literal `@name` argument.
+
+`run` resolves aliases from whichever backend you've configured (native,
+`pass`, `secret-service` or `command`), exactly like `tacitty get`. With the
+native vault, if it's locked it asks for your master passphrase once, unlocks
+it, then runs.
+
+> [!IMPORTANT]
+> **`run` does put the secret in the command's arguments.** Unlike a
+> password prompt, the resolved secret becomes part of the child command's
+> argv, which is visible to other processes in `ps` and
+> `/proc/<pid>/cmdline` while the command runs. `tacitty run` keeps the
+> secret out of your **shell history, terminal scrollback and clipboard**,
+> but it does **not** hide it from `ps`. When a tool offers its own password
+> prompt or a password-command, prefer that for full protection — for
+> example `RESTIC_PASSWORD_COMMAND="tacitty get restic"` for restic, rather
+> than passing the password as an argument.
 
 <a id="sharing"></a>
 

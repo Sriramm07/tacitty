@@ -85,6 +85,7 @@ Is one of your *real* passwords starting with `@`? Type `@@` for a literal
 | `tacitty group rm <group>` | Delete a group (its aliases move to the default group) |
 | `tacitty group default [<group>]` | Show or set the group new aliases go into |
 | `tacitty get <alias> [--force]` | Print a secret to stdout (refuses a terminal without `--force`) |
+| `tacitty run [--] <cmd> [args ...]` | Run `<cmd>`, replacing `@alias` arguments with the real secret (keeps it out of history/scrollback; see [the note on `ps`](docs/GUIDE.md#run)) |
 | `tacitty export [<alias> ...] [-g <group>] -o <file> [--with-key <key or file>] [--armor]` | Write aliases to an encrypted file to share with colleagues (protected by a passphrase, or by their age/SSH public keys) |
 | `tacitty import <file> [-i <identity>] [-g <group>] [--overwrite]` | Add the aliases from an export file to your vault |
 | `tacitty shell [-- <cmd> ...]` | Run your shell (or `<cmd>`) inside taciTTY |
@@ -150,6 +151,7 @@ The [taciTTY guide](docs/GUIDE.md) covers everything else:
 - [**How it works**](docs/GUIDE.md#how-it-works): how password prompts are detected, locally and over SSH
 - [**Auto-start**](docs/GUIDE.md#auto-start): what `tacitty init` changes, and how to switch it off
 - [**Groups**](docs/GUIDE.md#groups): organising aliases (for example a `prod` group) for listing and sharing
+- [**Running a command with an alias**](docs/GUIDE.md#run): `tacitty run` for tools that only take a password on the command line, and what it does and doesn't hide
 - [**Sharing aliases securely**](docs/GUIDE.md#sharing): giving colleagues the same aliases with `tacitty export` / `import`
 - [**Security**](docs/GUIDE.md#security): threat model, protections and known limitations
 - [**Development**](docs/GUIDE.md#development): building, testing and releasing

@@ -55,6 +55,14 @@ One honest caveat: any program that switches echo off and reads a line
 gets the secret, whether or not it's a "real" password prompt. So only type
 an alias where you actually mean to enter that password.
 
+For tools that take a password as a command-line argument instead of
+prompting, there's [`tacitty run`](GUIDE.md#run). It's honest about its
+tradeoff: it keeps the secret out of your shell history, scrollback and
+clipboard, but — unlike a prompt — the secret does end up in the command's
+arguments, where it's visible in `ps`. For full protection, prefer a tool's
+own prompt or a password-command (e.g.
+`RESTIC_PASSWORD_COMMAND="tacitty get restic"`).
+
 ### What about prompts on a remote server over SSH?
 
 Inside `ssh` (and `mosh`, `docker exec -it`, `kubectl exec -it`), taciTTY

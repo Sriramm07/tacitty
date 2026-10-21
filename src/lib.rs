@@ -14,6 +14,7 @@ pub mod group;
 pub mod logging;
 pub mod remote;
 pub mod resolver;
+pub mod run;
 pub mod secret;
 pub mod statemachine;
 pub mod sys;

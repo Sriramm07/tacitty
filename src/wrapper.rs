@@ -683,7 +683,9 @@ fn deliver(
     }
 }
 
-fn exit_code_of(status: std::process::ExitStatus) -> i32 {
+/// Map a child's exit to a shell-style status: its own code, or `128 +
+/// signal` when it was killed by a signal.
+pub fn exit_code_of(status: std::process::ExitStatus) -> i32 {
     use std::os::unix::process::ExitStatusExt;
     status
         .code()

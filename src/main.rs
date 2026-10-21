@@ -12,6 +12,8 @@ use tacitty::autostart;
 use tacitty::config::{self, Config};
 use tacitty::export;
 use tacitty::group;
+use tacitty::resolver::{ResolveOutcome, Resolver};
+use tacitty::run::{classify_arg, ArgAction};
 use tacitty::secret::SecretBuf;
 use tacitty::sys;
 use tacitty::update;
@@ -103,6 +105,32 @@ listing (`tacitty ls -g prod`) and sharing (`tacitty export -g prod ...`).")]
         alias: String,
         #[arg(long)]
         force: bool,
+    },
+    /// Run a command, replacing `@alias` arguments with the real secret.
+    #[command(
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        after_help = "\
+Each argument that is exactly `@alias` (or `--flag=@alias`) is replaced with
+the secret stored under that alias before the command runs; everything else,
+including the command's own flags, is passed through untouched. Use `@@name`
+for a literal `@name`, and note that `user@host` or `me@example.com` is left
+alone (only a whole argument starting with the trigger is substituted).
+
+  tacitty run swaks --auth-password @smtp -tls ...
+  tacitty run mysql --host db --user app --password=@proddb
+
+Unlike a password prompt, `run` puts the secret in the command's arguments,
+where it is visible in `ps` and /proc/<pid>/cmdline. It keeps the secret out
+of your shell history, scrollback and clipboard, but not out of `ps`; for
+that, prefer the tool's own password prompt or a password-command such as
+RESTIC_PASSWORD_COMMAND=\"tacitty get restic\"."
+    )]
+    Run {
+        /// The command to run, then its arguments (`@alias` ones are
+        /// substituted). Put `--` before it to be safe with leading dashes.
+        #[arg(value_name = "COMMAND", required = true, num_args = 1..)]
+        args: Vec<String>,
     },
     /// Write aliases to an encrypted file to share with someone.
     #[command(after_help = "\
@@ -265,6 +293,7 @@ fn main() -> Result<()> {
             overwrite,
         } => cmd_import(&file, &identity, group.as_deref(), overwrite),
         Cmd::Get { alias, force } => cmd_get(&alias, force),
+        Cmd::Run { args } => cmd_run(args),
         Cmd::Shell { autostart, command } => cmd_shell(command, autostart),
         Cmd::Enable => cmd_enable(),
         Cmd::Disable => cmd_disable(),
@@ -1020,6 +1049,86 @@ fn cmd_get(alias_name: &str, force: bool) -> Result<i32> {
     let mut out = std::io::stdout();
     out.write_all(secret.as_slice())?;
     Ok(0)
+}
+
+/// `tacitty run [--] <command> [args...]`: run `<command>`, replacing any
+/// `@alias` argument with the real secret first. The secret ends up in the
+/// child's argv — visible in `ps` — which is the documented tradeoff for
+/// this command (it protects shell history, scrollback and the clipboard,
+/// not `ps`).
+fn cmd_run(args: Vec<String>) -> Result<i32> {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    // clap guarantees at least one argument (`num_args = 1..`, required), but
+    // check rather than index blindly.
+    let mut it = args.into_iter();
+    let command = it
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("run: a command is required"))?;
+    let rest: Vec<String> = it.collect();
+
+    let cfg = load_config()?;
+    let trigger = cfg.trigger_byte();
+    let trigger_ch = trigger as char;
+
+    // Resolve every `@alias` up front, so an unknown alias (or any resolver
+    // error) stops us before the command runs. The command name itself
+    // (argv[0] of the child) is never substituted.
+    let mut resolver: Option<Resolver> = None;
+    let mut resolved: Vec<OsString> = Vec::with_capacity(rest.len());
+    for arg in &rest {
+        match classify_arg(arg, trigger) {
+            ArgAction::Passthrough => resolved.push(OsString::from(arg)),
+            ArgAction::Escape(literal) => resolved.push(OsString::from(literal)),
+            ArgAction::Alias { flag, name } => {
+                if resolver.is_none() {
+                    resolver = Some(Resolver::new(cfg.clone())?);
+                }
+                let r = resolver.as_mut().expect("resolver initialised just above");
+                // The resolver validates the secret with `vault::validate_secret`
+                // (control characters etc. would break the target command),
+                // returning `Error` on failure, so nothing invalid reaches argv.
+                let secret = resolve_run_alias(r, &name, trigger_ch)?;
+                // The one unavoidable plaintext copy: the flag prefix plus the
+                // secret bytes, moved straight into the child's argv. Not kept
+                // anywhere else, never printed.
+                let mut bytes = flag.into_bytes();
+                bytes.extend_from_slice(secret.as_slice());
+                resolved.push(OsString::from_vec(bytes));
+            }
+        }
+    }
+
+    let status = std::process::Command::new(&command)
+        .args(&resolved)
+        .status()
+        .with_context(|| format!("running `{command}`"))?;
+    Ok(wrapper::exit_code_of(status))
+}
+
+/// Resolve one alias for `tacitty run`, prompting for the master passphrase
+/// and unlocking if the native vault is locked (as `cmd_get` does). Fails
+/// without running on an unknown alias or any resolver error.
+fn resolve_run_alias(resolver: &mut Resolver, name: &str, trigger: char) -> Result<SecretBuf> {
+    let mut asked = false;
+    loop {
+        match resolver.resolve(name) {
+            ResolveOutcome::Found(secret) => return Ok(secret),
+            ResolveOutcome::NotFound => {
+                bail!("no such alias: {name} (use {trigger}{trigger} for a literal {trigger})")
+            }
+            ResolveOutcome::Locked if !asked => {
+                asked = true;
+                let pass = read_passphrase("Master passphrase: ")?;
+                resolver
+                    .unlock(&pass)
+                    .map_err(|e| anyhow::anyhow!("unlocking vault: {e}"))?;
+            }
+            ResolveOutcome::Locked => bail!("vault is locked"),
+            ResolveOutcome::Error(e) => bail!("resolving @{name}: {e}"),
+        }
+    }
 }
 
 fn cmd_shell(command: Vec<String>, autostart: bool) -> Result<i32> {

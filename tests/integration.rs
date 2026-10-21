@@ -1274,3 +1274,131 @@ fn tmux_panes_are_wrapped_automatically() {
     let _ = tmux(&["kill-server"]);
     assert!(screen.contains("GOT[s3cr3t!]"), "{screen}");
 }
+
+// ---------------------------------------------------------------------------
+// `tacitty run`
+// ---------------------------------------------------------------------------
+
+/// A `bash -c` script that writes each of its arguments, one per line, to
+/// `out`. Combined with a trailing `_` (bash's `$0`) and the real arguments,
+/// this lets a test see exactly what argv the child received.
+fn argv_dump_script(out: &std::path::Path) -> String {
+    format!("printf '%s\\n' \"$@\" > {}", out.display())
+}
+
+#[test]
+fn run_substitutes_a_whole_arg_alias_into_the_child_argv() {
+    let env = setup_with_alias("prod-db", "s3cr3t!");
+    let out = env.home.join("argv.txt");
+    let script = argv_dump_script(&out);
+    // The alias name is what appears on tacitty's command line; the child
+    // must receive the real secret in its place.
+    let result = env
+        .command(&["run", "bash", "-c", &script, "_", "@prod-db"])
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "run failed: {result:?}");
+    let argv = std::fs::read_to_string(&out).unwrap();
+    assert_eq!(argv, "s3cr3t!\n", "child argv was {argv:?}");
+}
+
+#[test]
+fn run_substitutes_the_flag_equals_alias_form() {
+    let env = setup_with_alias("smtp", "p@ss-w0rd");
+    let out = env.home.join("argv.txt");
+    let script = argv_dump_script(&out);
+    let result = env
+        .command(&["run", "bash", "-c", &script, "_", "--auth-password=@smtp"])
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "run failed: {result:?}");
+    let argv = std::fs::read_to_string(&out).unwrap();
+    // The flag is kept verbatim; only the value is replaced.
+    assert_eq!(
+        argv, "--auth-password=p@ss-w0rd\n",
+        "child argv was {argv:?}"
+    );
+}
+
+#[test]
+fn run_passes_a_doubled_trigger_through_as_a_literal() {
+    let env = setup_with_alias("prod-db", "s3cr3t!");
+    let out = env.home.join("argv.txt");
+    let script = argv_dump_script(&out);
+    let result = env
+        .command(&["run", "bash", "-c", &script, "_", "@@literal", "--p=@@x"])
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "run failed: {result:?}");
+    let argv = std::fs::read_to_string(&out).unwrap();
+    assert_eq!(argv, "@literal\n--p=@x\n", "child argv was {argv:?}");
+}
+
+#[test]
+fn run_leaves_an_email_style_arg_untouched() {
+    let env = setup_with_alias("prod-db", "s3cr3t!");
+    let out = env.home.join("argv.txt");
+    let script = argv_dump_script(&out);
+    let result = env
+        .command(&["run", "bash", "-c", &script, "_", "user@example.com"])
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "run failed: {result:?}");
+    let argv = std::fs::read_to_string(&out).unwrap();
+    assert_eq!(argv, "user@example.com\n", "child argv was {argv:?}");
+}
+
+#[test]
+fn run_errors_on_an_unknown_alias_and_does_not_run_the_command() {
+    let env = setup_with_alias("prod-db", "s3cr3t!");
+    let out = env.home.join("argv.txt");
+    let script = argv_dump_script(&out);
+    let result = env
+        .command(&["run", "bash", "-c", &script, "_", "@nope"])
+        .output()
+        .unwrap();
+    assert!(!result.status.success(), "run should have failed");
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("no such alias: nope"),
+        "stderr was {stderr:?}"
+    );
+    assert!(
+        stderr.contains("@@"),
+        "should hint the @@ escape: {stderr:?}"
+    );
+    assert!(!out.exists(), "the command must not have run");
+}
+
+#[test]
+fn run_propagates_the_child_exit_status() {
+    let env = setup_with_alias("prod-db", "s3cr3t!");
+    let result = env
+        .command(&["run", "bash", "-c", "exit 7"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        result.status.code(),
+        Some(7),
+        "status was {:?}",
+        result.status
+    );
+}
+
+#[test]
+fn run_prompts_for_the_passphrase_when_the_vault_is_locked() {
+    let env = Env::fresh();
+    init_vault(&env, PASSPHRASE);
+    add_alias(&env, "prod-db", "s3cr3t!", PASSPHRASE);
+    // Deliberately NOT unlocking: `add` leaves the agent locked, so `run`
+    // must prompt for the master passphrase inline before resolving.
+    let out = env.home.join("argv.txt");
+    let script = argv_dump_script(&out);
+    let mut p = env.spawn(&["run", "bash", "-c", &script, "_", "@prod-db"], 15_000);
+    p.exp_string("Master passphrase:").unwrap();
+    p.send_line(PASSPHRASE).unwrap();
+    p.exp_eof().unwrap();
+    assert!(exited_ok(&mut p), "run did not exit 0");
+    let argv = std::fs::read_to_string(&out).unwrap();
+    assert_eq!(argv, "s3cr3t!\n", "child argv was {argv:?}");
+}

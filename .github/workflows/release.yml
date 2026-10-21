@@ -80,6 +80,20 @@ jobs:
       - name: build
         run: cargo build --release --locked --target ${{ matrix.target }}
 
+      # The man page and completions come from the live CLI and are identical
+      # for every architecture. We must not run a cross-built (aarch64)
+      # binary on this x86_64 runner, so build a throwaway host-native binary
+      # and generate them with that; the same files go into both tarballs.
+      - name: generate man page and completions
+        run: |
+          cargo build --release --locked
+          gen="$PWD/target/release/tacitty"
+          mkdir -p gen/completions
+          "$gen" man > gen/tacitty.1
+          "$gen" completions bash > gen/completions/tacitty.bash
+          "$gen" completions zsh  > gen/completions/_tacitty
+          "$gen" completions fish > gen/completions/tacitty.fish
+
       - name: package tarball
         env:
           TARGET: ${{ matrix.target }}
@@ -87,6 +101,8 @@ jobs:
           name="tacitty-${GITHUB_REF_NAME}-${TARGET}"
           mkdir -p "dist/$name"
           cp "target/${TARGET}/release/tacitty" README.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
+          cp gen/tacitty.1 "dist/$name/"
+          cp -r gen/completions "dist/$name/completions"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
           rm -rf "dist/$name"
@@ -130,6 +146,19 @@ jobs:
           codesign --verify --verbose "target/${{ matrix.target }}/release/tacitty"
           "target/${{ matrix.target }}/release/tacitty" --version
 
+      # As on Linux: generate the arch-independent man page and completions
+      # from a host-native (aarch64) binary rather than running a cross-built
+      # x86_64 binary on this Apple Silicon runner.
+      - name: generate man page and completions
+        run: |
+          cargo build --release --locked
+          gen="$PWD/target/release/tacitty"
+          mkdir -p gen/completions
+          "$gen" man > gen/tacitty.1
+          "$gen" completions bash > gen/completions/tacitty.bash
+          "$gen" completions zsh  > gen/completions/_tacitty
+          "$gen" completions fish > gen/completions/tacitty.fish
+
       - name: package tarball
         env:
           TARGET: ${{ matrix.target }}
@@ -137,6 +166,8 @@ jobs:
           name="tacitty-${GITHUB_REF_NAME}-${TARGET}"
           mkdir -p "dist/$name"
           cp "target/${TARGET}/release/tacitty" README.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
+          cp gen/tacitty.1 "dist/$name/"
+          cp -r gen/completions "dist/$name/completions"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
           rm -rf "dist/$name"

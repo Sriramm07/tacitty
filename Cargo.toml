@@ -37,6 +37,8 @@ age-core = "0.12"
 base64 = "0.22"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+clap_mangen = "0.2"
 libc = "0.2"
 regex = "1"
 secrecy = "0.10"

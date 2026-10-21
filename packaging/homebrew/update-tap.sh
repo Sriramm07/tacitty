@@ -61,6 +61,12 @@ class Tacitty < Formula
   def install
     bin.install "tacitty"
     doc.install "README.md"
+    # The release tarball also ships a man page and shell completions
+    # (generated from the CLI at build time); install them if present.
+    man1.install "tacitty.1" if File.exist?("tacitty.1")
+    bash_completion.install "completions/tacitty.bash" if File.exist?("completions/tacitty.bash")
+    zsh_completion.install "completions/_tacitty" if File.exist?("completions/_tacitty")
+    fish_completion.install "completions/tacitty.fish" if File.exist?("completions/tacitty.fish")
   end
 
   def caveats

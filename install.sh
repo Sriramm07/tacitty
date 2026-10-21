@@ -131,6 +131,9 @@ main() {
     echo
     echo "Next: run '$INSTALL_DIR/tacitty init' to create your vault and turn on"
     echo "auto-start, then 'tacitty add <alias>' to store your first secret."
+    echo
+    echo "Shell completions: run 'tacitty completions <bash|zsh|fish>'; see the guide"
+    echo "(https://github.com/$REPO/blob/main/docs/GUIDE.md#completions) for where to put it."
 }
 
 main "$@"

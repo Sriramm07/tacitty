@@ -1,6 +1,6 @@
 [package]
 name = "tacitty"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 authors = ["Sriram P <sriram_297@yahoo.com>"]
 repository = "https://github.com/Sriramm07/tacitty"

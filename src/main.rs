@@ -487,7 +487,17 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 // commands
 // ---------------------------------------------------------------------------
 
+/// A small cyan ASCII splash (FBR Cyan figlet of "tacitty"), shown once at
+/// `init`. Only when stdout is a real terminal, so piped/scripted output
+/// stays clean.
+fn print_banner() {
+    if sys::isatty(1) {
+        out!("\n{}\n", include_str!("banner.txt"));
+    }
+}
+
 fn cmd_init(no_autostart: bool) -> Result<i32> {
+    print_banner();
     let path = config::vault_path()?;
     if vault::exists(&path) {
         bail!(

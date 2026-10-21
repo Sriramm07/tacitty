@@ -87,7 +87,7 @@ jobs:
       # and generate them with that; the same files go into both tarballs.
       - name: generate man page and completions
         run: |
-          cargo build --release --locked
+          env -u CARGO_BUILD_TARGET cargo build --release --locked
           gen="$PWD/target/release/tacitty"
           mkdir -p gen/completions
           "$gen" man > gen/tacitty.1
@@ -152,7 +152,7 @@ jobs:
       # x86_64 binary on this Apple Silicon runner.
       - name: generate man page and completions
         run: |
-          cargo build --release --locked
+          env -u CARGO_BUILD_TARGET cargo build --release --locked
           gen="$PWD/target/release/tacitty"
           mkdir -p gen/completions
           "$gen" man > gen/tacitty.1

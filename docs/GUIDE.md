@@ -148,10 +148,17 @@ lock you out.
 | Skip it for a whole login session | add `export NO_TACITTY=1` to `~/.profile` (zsh on macOS: `~/.zprofile`) |
 | Create the vault without auto-start | `tacitty init --no-autostart` |
 
+**tmux, screen and other terminals inside terminals just work.** taciTTY
+remembers *which* terminal it wrapped (`TACITTY_ACTIVE` holds its device
+path, e.g. `/dev/pts/3`). A tmux pane or screen window is a new terminal of
+its own, so its shell sees that it isn't the wrapped one and wraps itself,
+with no tmux configuration. (The wrapper around the tmux client itself
+stays out of the way: tmux never looks like a password prompt.)
+
 > [!NOTE]
 > Auto-start supports **bash** and **zsh**. For other shells, run
 > `tacitty shell` or set your terminal's command to `tacitty shell`.
-> **For tmux**, wrap each *pane* rather than the tmux client: see
+> Without auto-start, you can still wrap every tmux pane with
 > [`contrib/tacitty.tmux.conf`](../contrib/tacitty.tmux.conf).
 
 <a id="groups"></a>
@@ -392,9 +399,9 @@ prevented); someone who can overwrite the vault or config files.
 - **gpg's default pinentry** (`pinentry-curses`, `pinentry-gnome3`) runs in
   raw mode or as a GUI, so taciTTY can't see it. Set gpg-agent's
   `pinentry-program` to `pinentry-tty` to use aliases at gpg prompts.
-- **tmux / screen:** if taciTTY wraps the tmux *client*, it only sees
-  tmux's own raw terminal. Run taciTTY inside each pane instead (see
-  `contrib/tacitty.tmux.conf`).
+- **tmux / screen without auto-start:** with auto-start on, every pane is
+  wrapped automatically. Without it, wrapping only the tmux *client* isn't
+  enough (it can't see into the panes): use `contrib/tacitty.tmux.conf`.
 - Programs that read passwords in raw mode with their own masking (rather
   than the terminal's built-in hidden input) aren't detected.
 - The remote-prompt fallback is a heuristic and could, in principle, match

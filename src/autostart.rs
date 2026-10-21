@@ -81,7 +81,7 @@ pub fn render_block(bin: &Path) -> String {
         "{BEGIN_MARKER}
 # Managed by `tacitty enable` / `tacitty disable`; set NO_TACITTY=1 to skip.
 case $- in *i*)
-  if [ -z \"${{TACITTY_ACTIVE:-}}\" ] && [ -z \"${{NO_TACITTY:-}}\" ] && [ -t 0 ] && [ -x {bin} ]; then
+  if [ \"${{TACITTY_ACTIVE:-}}\" != \"$(tty 2>/dev/null)\" ] && [ -z \"${{NO_TACITTY:-}}\" ] && [ -t 0 ] && [ -x {bin} ]; then
     {bin} shell --autostart
     __tacitty_rc=$?
     if [ \"$__tacitty_rc\" -ne {FALLBACK_EXIT_CODE} ]; then exit \"$__tacitty_rc\"; fi

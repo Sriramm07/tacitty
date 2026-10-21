@@ -9,7 +9,9 @@
 # skipped with NO_TACITTY=1, and if tacitty can't start (exit code 213) you
 # get your normal shell instead of a terminal that closes immediately.
 case $- in *i*)
-  if [ -z "${TACITTY_ACTIVE:-}" ] && [ -z "${NO_TACITTY:-}" ] && [ -t 0 ] \
+  # TACITTY_ACTIVE names the terminal already wrapped; a tmux pane or
+  # screen window is a different terminal, so it gets wrapped too.
+  if [ "${TACITTY_ACTIVE:-}" != "$(tty 2>/dev/null)" ] && [ -z "${NO_TACITTY:-}" ] && [ -t 0 ] \
      && command -v tacitty >/dev/null 2>&1; then
     tacitty shell --autostart
     __tacitty_rc=$?

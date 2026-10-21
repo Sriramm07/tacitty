@@ -33,6 +33,8 @@ surfers. taciTTY lets you type a short, memorable alias instead. It works at
   global keyboard hooks, and nothing in your shell history or scrollback.
 - 🌐 **Works over SSH too.** Prompts from remote hosts inside `ssh`,
   `mosh`, `docker exec` or `kubectl exec` sessions are recognised as well.
+- 🧩 **Works inside tmux and screen.** Every pane is wrapped automatically,
+  with no configuration.
 - ⚡ **Quick to set up.** One self-contained binary. `tacitty init` turns it
   on for every new terminal automatically.
 

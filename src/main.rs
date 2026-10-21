@@ -1160,10 +1160,10 @@ fn cmd_doctor() -> Result<i32> {
         Err(e) => outln!("[warn] could not check auto-start: {e:#}"),
     }
 
-    if std::env::var_os("TACITTY_ACTIVE").is_some() {
-        outln!("[warn] already inside a tacitty shell (nested `shell` would not re-wrap)");
+    if wrapper::is_nested() {
+        outln!("[ok]   this terminal is wrapped by tacitty");
     } else {
-        outln!("[ok]   not currently nested");
+        outln!("[info] this terminal is not wrapped by tacitty (open a new terminal if auto-start is on, or run `tacitty shell`)");
     }
 
     match cfg.backend {

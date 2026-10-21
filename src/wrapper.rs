@@ -292,10 +292,21 @@ pub struct RunOptions {
     pub command: Option<Vec<String>>,
 }
 
-/// Are we already inside a `tacitty shell`? Then [`run`] doesn't wrap
-/// again; it just replaces itself with the plain shell.
+/// Is *this terminal* already wrapped by a `tacitty shell`? Then [`run`]
+/// doesn't wrap again; it just replaces itself with the plain shell.
+///
+/// `TACITTY_ACTIVE` holds the device path of the terminal a wrapper gave its
+/// shell. Inside tmux, `screen`, or any other program that opens a new
+/// terminal of its own, the variable is inherited but the terminal is a
+/// different one: that terminal isn't wrapped (the outer wrapper can't see
+/// into it), so it should be. A value from an older taciTTY (`1`) carries
+/// no path and is treated as "already wrapped".
 pub fn is_nested() -> bool {
-    std::env::var_os("TACITTY_ACTIVE").is_some()
+    match std::env::var("TACITTY_ACTIVE") {
+        Err(_) => false,
+        Ok(v) if v.starts_with('/') => sys::ttyname(0).as_deref() == Some(v.as_str()),
+        Ok(_) => true,
+    }
 }
 
 /// Run `tacitty shell`: spawn the shell (or `options.command`) on a pty and
@@ -303,7 +314,7 @@ pub fn is_nested() -> bool {
 /// the child's exit code (or 128+signal, matching normal shell convention).
 pub fn run(cfg: Config, options: RunOptions) -> anyhow::Result<i32> {
     if is_nested() {
-        eprintln!("tacitty: already active in this shell, not nesting");
+        eprintln!("tacitty: already active in this terminal, not nesting");
         let shell = shell_command(&options);
         let err = exec_replace(shell);
         anyhow::bail!("exec failed: {err}");
@@ -341,7 +352,9 @@ pub fn run(cfg: Config, options: RunOptions) -> anyhow::Result<i32> {
     sys::harden_process();
 
     let mut cmd = build_command(&options);
-    cmd.env("TACITTY_ACTIVE", "1");
+    // Which terminal is wrapped: see `is_nested`.
+    let wrapped_tty = sys::ttyname(pty.slave.as_raw_fd()).unwrap_or_else(|| "1".to_string());
+    cmd.env("TACITTY_ACTIVE", wrapped_tty);
     let mut child = sys::spawn_on_pty(&mut cmd, pty.slave)?;
     let child_pid = child.id() as i32;
 

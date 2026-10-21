@@ -485,6 +485,21 @@ const TIOCSCTTY: libc::c_ulong = libc::TIOCSCTTY as libc::c_ulong;
 /// has been opened (`ptyioctl` in XNU's `bsd/kern/tty_dev.c`; `openpty`
 /// opens it). Ghostty and iTerm2 detect password input on macOS the same
 /// way. `tcgetpgrp(master)` likewise reports the slave's foreground group.
+/// The device path of the terminal open on `fd` (e.g. `/dev/pts/3`), if it
+/// is one.
+pub fn ttyname(fd: RawFd) -> Option<String> {
+    let mut buf = [0 as libc::c_char; 256];
+    // SAFETY: `buf` is a writable buffer of the length we pass; on success
+    // ttyname_r NUL-terminates it within that length.
+    let rc = unsafe { libc::ttyname_r(fd, buf.as_mut_ptr(), buf.len()) };
+    if rc != 0 {
+        return None;
+    }
+    // SAFETY: on success the buffer holds a NUL-terminated C string.
+    let name = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
+    name.to_str().ok().map(str::to_string)
+}
+
 pub struct Pty {
     pub master: OwnedFd,
     pub slave: OwnedFd,

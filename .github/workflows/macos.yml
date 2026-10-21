@@ -43,6 +43,11 @@ jobs:
         with:
           toolchain: stable
 
+      # The tmux integration test is skipped where tmux is missing; make
+      # sure it actually runs here.
+      - name: install tmux
+        run: command -v tmux || brew install tmux
+
       # Every step runs even if an earlier one fails, so one run reports
       # everything; the job still fails at the end if anything did.
       - name: build and test

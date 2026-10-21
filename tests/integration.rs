@@ -303,8 +303,10 @@ fn init_enables_autostart_and_new_shells_are_wrapped() {
     assert!(installed.is_file(), "binary was not installed");
 
     let mut sh = spawn_login_bash(&env);
-    sh.send_line("echo ACTIVE[$TACITTY_ACTIVE]").unwrap();
-    sh.exp_string("ACTIVE[1]").unwrap();
+    // The wrapper records which terminal it wrapped: this one.
+    sh.send_line("[ \"$TACITTY_ACTIVE\" = \"$(tty)\" ] && echo WRAPPED$((1+1))")
+        .unwrap();
+    sh.exp_string("WRAPPED2").unwrap();
     sh.send_line("exit").unwrap();
     sh.exp_eof().unwrap();
 
@@ -1153,4 +1155,122 @@ fn ctrl_c_at_passphrase_prompt_restores_echo() {
     assert_eq!(state.trim(), "echo", "terminal left with echo off");
     p.send_line("exit").unwrap();
     p.exp_eof().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Terminals inside terminals (tmux, screen, ...)
+// ---------------------------------------------------------------------------
+
+/// A vault with @prod-db, and auto-start enabled in this Env's ~/.bashrc.
+fn env_with_autostart() -> Env {
+    let env = setup_with_alias("prod-db", "s3cr3t!");
+    std::fs::write(env.home.join(".bashrc"), "").unwrap();
+    let mut p = env.spawn(&["enable"], 10_000);
+    p.exp_eof().unwrap();
+    env
+}
+
+/// A new terminal opened inside a wrapped one (what tmux and screen do for
+/// each pane/window) gets wrapped too, and aliases work in it.
+#[test]
+fn a_terminal_inside_a_wrapped_terminal_is_wrapped_too() {
+    let env = env_with_autostart();
+    let mut sh = spawn_login_bash(&env);
+    sh.send_line("PS1='OUTER$ '").unwrap();
+    sh.exp_string("OUTER$ ").unwrap();
+    // A fresh pty with an interactive bash in it, like a tmux pane.
+    sh.send_line("python3 -c 'import pty; pty.spawn([\"bash\", \"-i\"])'")
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    sh.send_line("PS1='INNER$ '").unwrap();
+    sh.exp_string("INNER$ ").unwrap();
+    // The inner terminal's wrapper recorded the inner terminal.
+    sh.send_line("[ \"$TACITTY_ACTIVE\" = \"$(tty)\" ] && echo WRAPPED$((1+1))")
+        .unwrap();
+    sh.exp_string("WRAPPED2").unwrap();
+    sh.send_line("bash -c 'read -s -p \"$(printf \"Pass%s: \" word)\" pw; echo; printf \"%s[%s]\\n\" GOT \"$pw\"'")
+        .unwrap();
+    sh.exp_string("Password: ").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    sh.send("@prod-db\r").unwrap();
+    sh.flush().unwrap();
+    sh.exp_string("GOT[s3cr3t!]").unwrap();
+    sh.send_line("exit").unwrap(); // inner wrapped shell
+    sh.exp_string("OUTER$ ").unwrap();
+    sh.send_line("exit").unwrap(); // outer wrapped shell
+    sh.exp_eof().unwrap();
+}
+
+/// Real tmux: a pane's shell is wrapped automatically, even though tmux
+/// passes the outer terminal's TACITTY_ACTIVE on to it. Skipped where tmux
+/// isn't installed.
+#[test]
+fn tmux_panes_are_wrapped_automatically() {
+    if std::process::Command::new("tmux")
+        .arg("-V")
+        .output()
+        .is_err()
+    {
+        eprintln!("note: tmux not installed, skipping");
+        return;
+    }
+    let env = env_with_autostart();
+    let sock = format!("tacitty-test-{}", std::process::id());
+    let tmux = |args: &[&str]| {
+        let mut c = std::process::Command::new("tmux");
+        c.args(["-L", &sock, "-f", "/dev/null"]).args(args);
+        c.env("HOME", &env.home);
+        c.env("XDG_RUNTIME_DIR", &env.runtime);
+        c.env("SHELL", "/bin/bash");
+        c.env("TACITTY_TEST_WORK_FACTOR", "8");
+        c.env("BASH_SILENCE_DEPRECATION_WARNING", "1");
+        // As if tmux had been started from inside a wrapped terminal.
+        c.env("TACITTY_ACTIVE", "/dev/not-this-terminal");
+        c.output().unwrap()
+    };
+    let capture =
+        || String::from_utf8_lossy(&tmux(&["capture-pane", "-p", "-t", "t"]).stdout).into_owned();
+    let wait_for = |needle: &str| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            let screen = capture();
+            if screen.contains(needle) {
+                return screen;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "never saw {needle:?}:\n{screen}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    };
+    assert!(tmux(&[
+        "new-session",
+        "-d",
+        "-s",
+        "t",
+        "-x",
+        "100",
+        "-y",
+        "30",
+        "bash -i"
+    ])
+    .status
+    .success());
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    tmux(&[
+        "send-keys",
+        "-t",
+        "t",
+        "[ \"$TACITTY_ACTIVE\" = \"$(tty)\" ] && echo PANE$((1+1))WRAPPED",
+        "Enter",
+    ]);
+    wait_for("PANE2WRAPPED");
+    tmux(&["send-keys", "-t", "t", "bash -c 'read -s -p \"$(printf \"Pass%s: \" word)\" pw; echo; printf \"%s[%s]\\n\" GOT \"$pw\"'", "Enter"]);
+    wait_for("Password:"); // capture-pane trims trailing spaces
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    tmux(&["send-keys", "-t", "t", "@prod-db", "Enter"]);
+    let screen = wait_for("GOT[");
+    let _ = tmux(&["kill-server"]);
+    assert!(screen.contains("GOT[s3cr3t!]"), "{screen}");
 }

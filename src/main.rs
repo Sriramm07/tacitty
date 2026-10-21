@@ -1450,7 +1450,7 @@ Store a secret and put the alias in the \fBprod\fR group.
 Share the \fBprod\fR group, encrypted to a colleague's public key.
 .TP
 .B tacitty run swaks \-\-auth\-password @smtp
-Run a command, expanding \fB@smtp\fR at its password prompt.
+Run a command with the secret for \fB@smtp\fR passed as the argument.
 .SH SECURITY
 A secret is only written while the terminal is hiding input (or at a detected
 remote prompt), and that is re\-checked at the moment of sending. For the threat

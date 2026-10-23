@@ -285,6 +285,53 @@ fn spawn_login_bash(env: &Env) -> rexpect::session::PtySession {
     rexpect::session::spawn_command(cmd, Some(15_000)).expect("spawn bash")
 }
 
+/// A real bash *login* shell (`bash -l -i`) in the test's HOME — what an ssh
+/// session starts. It reads `~/.bash_profile`/`~/.profile`, not `~/.bashrc`.
+fn spawn_login_shell_l(env: &Env) -> rexpect::session::PtySession {
+    let mut cmd = std::process::Command::new("/bin/bash");
+    cmd.args(["-l", "-i"]);
+    cmd.env("HOME", &env.home);
+    cmd.env("XDG_RUNTIME_DIR", &env.runtime);
+    cmd.env("SHELL", "/bin/bash");
+    cmd.env("TACITTY_TEST_WORK_FACTOR", "8");
+    cmd.env_remove("TACITTY_ACTIVE");
+    cmd.env_remove("NO_TACITTY");
+    cmd.env("BASH_SILENCE_DEPRECATION_WARNING", "1");
+    rexpect::session::spawn_command(cmd, Some(15_000)).expect("spawn login bash")
+}
+
+/// An ssh session is a bash *login* shell, which reads `~/.bash_profile` and
+/// not `~/.bashrc`. If the login file doesn't source `~/.bashrc`, the hook
+/// that lives there never runs — which is why ssh sessions needed a manual
+/// `tacitty shell`. `enable` must hook the login file too.
+#[test]
+fn ssh_style_login_shell_is_wrapped() {
+    let env = Env::fresh();
+    // The broken case: a login file that does NOT source ~/.bashrc.
+    std::fs::write(env.home.join(".bash_profile"), "export FROM_PROFILE=1\n").unwrap();
+
+    // init (enables autostart). Force SHELL=bash so the bash login file is hooked.
+    let mut cmd = env.command(&["init"]);
+    cmd.env("SHELL", "/bin/bash");
+    let mut p = rexpect::session::spawn_command(cmd, Some(10_000)).expect("spawn init");
+    p.exp_string("New master passphrase:").unwrap();
+    p.send_line(PASSPHRASE).unwrap();
+    p.exp_string("Confirm master passphrase:").unwrap();
+    p.send_line(PASSPHRASE).unwrap();
+    p.exp_eof().unwrap();
+
+    // The hook must have landed in the login file, not only ~/.bashrc.
+    let profile = std::fs::read_to_string(env.home.join(".bash_profile")).unwrap();
+    assert!(profile.contains("shell --autostart"), "profile: {profile:?}");
+
+    // A real login shell (what ssh starts) must now auto-wrap on its own.
+    let mut sh = spawn_login_shell_l(&env);
+    sh.send_line("echo ACTIVE[$TACITTY_ACTIVE]").unwrap();
+    sh.exp_string("ACTIVE[/dev/").unwrap();
+    sh.send_line("exit").unwrap();
+    let _ = sh.exp_eof();
+}
+
 #[test]
 fn init_enables_autostart_and_new_shells_are_wrapped() {
     let env = Env::fresh();

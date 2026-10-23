@@ -168,11 +168,75 @@ pub fn stable_packaged_path(exe: &Path) -> Vec<PathBuf> {
     ]
 }
 
+/// A directory on the system PATH (and on `sudo`'s `secure_path`). Running
+/// `tacitty enable`/`init` as root installs the binary here so `tacitty`
+/// resolves in *every* root context — `sudo tacitty`, `su`, non-login shells
+/// and an ssh `ProxyCommand` — not just an interactive shell that happens to
+/// have `~/.local/bin` on PATH.
+const SYSTEM_BIN_DIR: &str = "/usr/local/bin";
+
+/// Is `dir` safe to install a root-executed binary into — i.e. `dir` and its
+/// parent are both directories owned by root with no group/other write bit?
+/// If a non-root user can write either one, they could swap the directory or
+/// the binary we place in it and have root execute their code. This is the
+/// real case on macOS/Homebrew-Intel, where `/usr/local` (and `/usr/local/bin`)
+/// is owned by the admin *user*, not root — which this correctly rejects.
+fn is_safe_system_dir(dir: &Path) -> bool {
+    let root_owned_unwritable = |p: &Path| {
+        matches!(
+            fs::symlink_metadata(p),
+            Ok(m) if m.file_type().is_dir() && m.uid() == 0 && m.mode() & 0o022 == 0
+        )
+    };
+    root_owned_unwritable(dir) && dir.parent().map_or(true, root_owned_unwritable)
+}
+
+/// Copy `exe` into `dir` as `tacitty` and return the installed path. The copy
+/// is written to a temp file and renamed into place, so shells already
+/// running the old copy are never handed a half-written file. The temp is
+/// created with `O_CREAT|O_EXCL|O_NOFOLLOW` at mode `0755`, so a pre-planted
+/// symlink or file at the temp path can't redirect or race the write (root
+/// may be writing into a directory other users can see). The installed binary
+/// is `0755`: other users may execute it, but it is owned by the installing
+/// user and not writable by anyone else.
+fn install_to(dir: &Path, exe: &Path) -> Result<PathBuf> {
+    let target = dir.join("tacitty");
+    if target.canonicalize().ok().as_deref() == Some(exe) {
+        return Ok(target);
+    }
+    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let tmp = dir.join(format!(".tacitty.tmp-{}", std::process::id()));
+    let result = (|| -> Result<()> {
+        let mut src = fs::File::open(exe).with_context(|| format!("opening {}", exe.display()))?;
+        let mut dst = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o755)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&tmp)
+            .with_context(|| format!("creating {}", tmp.display()))?;
+        std::io::copy(&mut src, &mut dst)
+            .and_then(|_| dst.sync_all())
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        fs::rename(&tmp, &target).with_context(|| format!("installing {}", target.display()))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result?;
+    Ok(target)
+}
+
 /// Make sure a stable copy of the running binary exists for the hook to
 /// call, and return its path. Packaged installs (see
 /// [`is_packaged_install`]) are used as-is; anything else (e.g. a binary
 /// run from ~/Downloads) is copied to `~/.local/bin/tacitty`, so the hook
-/// keeps working if the original is moved or deleted.
+/// keeps working if the original is moved or deleted. For **root**, it is
+/// copied to [`SYSTEM_BIN_DIR`] instead — but only when that directory is
+/// safe ([`is_safe_system_dir`]) — so `tacitty` is on PATH in every root
+/// context; an unsafe or unwritable system dir falls back to `~/.local/bin`
+/// with a warning. (`/usr/local/bin` is itself a packaged path, so a later
+/// run finds the binary already there and reuses it in place.)
 pub fn install_binary() -> Result<PathBuf> {
     let exe = std::env::current_exe()
         .and_then(|p| p.canonicalize())
@@ -183,24 +247,32 @@ pub fn install_binary() -> Result<PathBuf> {
             .find(|p| p.is_file())
             .unwrap_or(exe));
     }
-    let dir = home()?.join(".local/bin");
-    let target = dir.join("tacitty");
-    if target.canonicalize().ok().as_deref() == Some(exe.as_path()) {
-        return Ok(target);
+    // Root: install to a system PATH dir so `tacitty` resolves everywhere —
+    // but ONLY if that dir is safe (root-owned, not writable by other users).
+    // Otherwise a non-root user could swap the binary and have root run it, so
+    // fall back to ~/.local/bin (safe, but not on sudo's secure_path — warn).
+    if crate::sys::geteuid() == 0 {
+        let sysdir = Path::new(SYSTEM_BIN_DIR);
+        if is_safe_system_dir(sysdir) {
+            if let Ok(p) = install_to(sysdir, &exe) {
+                return Ok(p);
+            }
+        }
+        eprintln!(
+            "tacitty: not installing to {SYSTEM_BIN_DIR} (missing, not root-owned, or writable \
+             by others); using ~/.local/bin instead. `tacitty` may not be found under `sudo`/`su` \
+             or in non-login shells — install it to a trusted system directory manually if you need that."
+        );
     }
-    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    // Copy to a temp name and rename over the target, so shells already
-    // running the old copy are never handed a half-written file.
-    let tmp = dir.join(format!(".tacitty.tmp-{}", std::process::id()));
-    fs::copy(&exe, &tmp).with_context(|| format!("copying binary to {}", tmp.display()))?;
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))?;
-    fs::rename(&tmp, &target).with_context(|| format!("installing {}", target.display()))?;
-    Ok(target)
+    install_to(&home()?.join(".local/bin"), &exe)
 }
 
 /// Rc files `enable` should hook: every supported shell whose rc file
-/// already exists, plus the login shell's (created if missing). On macOS,
-/// also bash's login-shell file (see [`bash_login_file`]).
+/// already exists, plus the login shell's (created if missing), plus bash's
+/// login-shell file (see [`bash_login_file`]). The last one matters on every
+/// platform: a bash *login* shell — an ssh session, a console login, a macOS
+/// terminal — reads `~/.bash_profile`/`~/.profile`, not `~/.bashrc`, so
+/// without this an ssh user would have to run `tacitty shell` by hand.
 fn target_files() -> Result<Vec<PathBuf>> {
     let login = login_shell();
     let mut out = Vec::new();
@@ -210,15 +282,16 @@ fn target_files() -> Result<Vec<PathBuf>> {
             out.push(rc);
         }
     }
-    #[cfg(target_os = "macos")]
-    {
-        let file = bash_login_file()?;
-        // ~/.profile is read by other shells too: only hook it when it is
-        // what the user's own bash login shell reads.
-        let bash_only = !file.ends_with(".profile");
-        if login == Some(Shell::Bash) || (bash_only && file.exists()) {
-            out.push(file);
-        }
+    let file = bash_login_file()?;
+    // ~/.profile is read by other shells (sh/dash) and display managers too:
+    // only hook it when it is what the user's own bash login shell reads. A
+    // bash-specific file (~/.bash_profile/~/.bash_login) is safe to hook when
+    // it exists. The hook itself is guarded by `case $- in *i*` and `[ -t 0 ]`,
+    // and when ~/.bashrc already runs the hook (and exits), the login file's
+    // copy is never reached — so this never double-wraps.
+    let bash_only = !file.ends_with(".profile");
+    if (login == Some(Shell::Bash) || (bash_only && file.exists())) && !out.contains(&file) {
+        out.push(file);
     }
     Ok(out)
 }
@@ -229,7 +302,6 @@ fn hookable_files() -> Result<Vec<PathBuf>> {
     for s in Shell::ALL {
         out.push(s.rc_path()?);
     }
-    #[cfg(target_os = "macos")]
     for name in BASH_LOGIN_FILES {
         out.push(home()?.join(name));
     }
@@ -237,23 +309,24 @@ fn hookable_files() -> Result<Vec<PathBuf>> {
 }
 
 /// What a bash login shell reads, in order of preference.
-#[cfg(target_os = "macos")]
 const BASH_LOGIN_FILES: [&str; 3] = [".bash_profile", ".bash_login", ".profile"];
 
 /// The file a bash *login* shell runs: the first of [`BASH_LOGIN_FILES`]
-/// that exists (bash reads only that one), or ~/.bash_profile if none
-/// does. macOS terminals start login shells, so there this, not
-/// ~/.bashrc, is what a new bash terminal runs. Picking the file bash
-/// already reads matters: creating ~/.bash_profile next to an existing
-/// ~/.profile would stop bash from reading ~/.profile at all.
-#[cfg(target_os = "macos")]
+/// that exists (bash reads only that one), or ~/.bash_profile if none does.
+/// ssh sessions, console logins and macOS terminals all start login shells,
+/// so there this, not ~/.bashrc, is what a new bash shell runs. Picking the
+/// file bash already reads matters: creating ~/.bash_profile next to an
+/// existing ~/.profile would stop bash from reading ~/.profile at all.
 fn bash_login_file() -> Result<PathBuf> {
-    let home = home()?;
-    Ok(BASH_LOGIN_FILES
+    Ok(bash_login_file_in(&home()?))
+}
+
+fn bash_login_file_in(home: &Path) -> PathBuf {
+    BASH_LOGIN_FILES
         .iter()
         .map(|name| home.join(name))
         .find(|p| p.exists())
-        .unwrap_or_else(|| home.join(".bash_profile")))
+        .unwrap_or_else(|| home.join(".bash_profile"))
 }
 
 /// Replace `path` with `content` atomically: write a temporary file next
@@ -448,6 +521,44 @@ mod tests {
         assert!(b.contains(&format!("-ne {FALLBACK_EXIT_CODE}")));
         assert!(b.contains("NO_TACITTY"));
         assert!(b.contains("TACITTY_ACTIVE"));
+    }
+
+    #[test]
+    fn system_bin_dir_is_on_secure_path_and_reused_in_place() {
+        assert_eq!(SYSTEM_BIN_DIR, "/usr/local/bin");
+        // The root dir is itself a "packaged" path, so a later enable finds
+        // the binary already installed and reuses it in place (idempotent).
+        assert!(is_packaged_install(
+            &PathBuf::from(SYSTEM_BIN_DIR).join("tacitty")
+        ));
+    }
+
+    #[test]
+    fn system_dir_safety_rejects_non_root_owned_and_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        // A path that doesn't exist is never "safe".
+        assert!(!is_safe_system_dir(&dir.path().join("nope")));
+        // A directory owned by the (non-root) test user must be rejected —
+        // this is the macOS/Homebrew-Intel `/usr/local` case.
+        if crate::sys::geteuid() != 0 {
+            let sub = dir.path().join("bin");
+            std::fs::create_dir(&sub).unwrap();
+            assert!(!is_safe_system_dir(&sub));
+        }
+    }
+
+    #[test]
+    fn bash_login_file_prefers_the_file_bash_actually_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        // Nothing present yet → default to ~/.bash_profile (what we'd create).
+        assert_eq!(bash_login_file_in(home), home.join(".bash_profile"));
+        // ~/.profile alone → that's what a login bash reads.
+        std::fs::write(home.join(".profile"), "").unwrap();
+        assert_eq!(bash_login_file_in(home), home.join(".profile"));
+        // ~/.bash_profile shadows ~/.profile for bash login shells.
+        std::fs::write(home.join(".bash_profile"), "").unwrap();
+        assert_eq!(bash_login_file_in(home), home.join(".bash_profile"));
     }
 
     #[test]

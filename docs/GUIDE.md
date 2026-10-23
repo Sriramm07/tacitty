@@ -170,17 +170,25 @@ machine. It:
 
 - copies the binary to `~/.local/bin/tacitty` (skipped for installs under
   `/usr` or `/opt`, which includes Homebrew and MacPorts), so it keeps
-  working if the downloaded file is moved;
+  working if the downloaded file is moved. **Run as root**, it installs to
+  `/usr/local/bin/tacitty` instead, so `tacitty` is on `PATH` in every root
+  context — `sudo tacitty`, `su`, non-login shells and an ssh `ProxyCommand`
+  — not just an interactive shell. (The copy is owned by root and not
+  writable by other users; they may run it, but it still uses *their* own
+  per-user vault and agent, never root's.)
 - adds a marked `# >>> tacitty autostart >>>` block to `~/.bashrc` and/or
   `~/.zshrc`.
 
-**On macOS**, zsh is the default shell and its `~/.zshrc` is hooked as
-above. macOS terminals start *login* shells, and a bash login shell reads
-`~/.bash_profile` instead of `~/.bashrc`, so for bash taciTTY also hooks
-`~/.bash_profile` (or `~/.bash_login` / `~/.profile`, if that's the file
-your bash reads). The shell inside taciTTY is started as a login shell
-too, as the terminal would have, so it picks up the same settings.
-`tacitty disable` removes the block from all of these files.
+**Login shells (ssh sessions, macOS terminals, console logins).** A bash
+*login* shell reads `~/.bash_profile` (or `~/.bash_login` / `~/.profile`),
+not `~/.bashrc` — so if that file doesn't source `~/.bashrc`, the hook there
+never runs and you'd have to start `tacitty shell` by hand. To avoid that,
+taciTTY also hooks the bash login file (whichever one your bash actually
+reads), so an ssh session auto-wraps like any other terminal. zsh reads
+`~/.zshrc` for every interactive shell, so it's already covered. The shell
+inside taciTTY is started as a login shell too, as the terminal would have,
+so it picks up the same settings. `tacitty disable` removes the block from
+all of these files.
 
 Your login shell is **not** changed. Scripts, `scp`, cron jobs and
 `ssh host cmd` never go through taciTTY, because the hook only runs for

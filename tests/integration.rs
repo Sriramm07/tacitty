@@ -101,7 +101,7 @@ fn normal_shell_line_passes_alias_through_literally() {
 }
 
 #[test]
-fn unknown_alias_bells_and_does_not_submit() {
+fn unknown_alias_reports_and_does_not_submit() {
     let env = setup_with_alias("prod-db", "s3cr3t!");
     let mut p = env.spawn_shell(15_000);
     p.send_line("bash -c 'read -s -p \"Password: \" pw; echo; echo GOT[$pw]'")
@@ -109,7 +109,8 @@ fn unknown_alias_bells_and_does_not_submit() {
     p.exp_string("Password: ").unwrap();
     p.send("@nope-does-not-exist\r").unwrap();
     p.flush().unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    // A miss must say so (otherwise the swallowed Enter looks like a hang).
+    p.exp_string("no such alias").unwrap();
     // prompt is still live: typing a real password now should work
     p.send("realpw\r").unwrap();
     p.flush().unwrap();

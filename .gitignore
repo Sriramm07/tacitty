@@ -4,3 +4,8 @@
 Cargo.lock.bak
 *.pdb
 __pycache__/
+
+# Local-only: never publish to the public repo
+/.claude/
+/issues-oct-22-and-later/
+/haproxy.cfg

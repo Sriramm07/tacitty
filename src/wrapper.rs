@@ -669,7 +669,20 @@ fn deliver(
             Err(_) => ring_local_bell(),
         },
         ResolveOutcome::NotFound => match cfg.on_miss {
-            crate::config::OnMiss::Bell => ring_local_bell(),
+            crate::config::OnMiss::Bell => {
+                ring_local_bell();
+                // Without feedback a mistyped alias looks like a hang: the
+                // Enter was captured (never sent to the auth program), so the
+                // prompt is still waiting. Say so, and leave the prompt live
+                // so the user can just type the right alias (or their real
+                // password) again — no wasted auth attempt.
+                let mut msg = Vec::with_capacity(alias.len() + 48);
+                msg.extend_from_slice(b"\r\ntacitty: no such alias \"");
+                msg.push(cfg.trigger_byte());
+                msg.extend_from_slice(alias.as_bytes());
+                msg.extend_from_slice(b"\" \xe2\x80\x94 try again\r\n");
+                write_stdout(&msg);
+            }
             crate::config::OnMiss::Literal => {
                 if !still_valid() {
                     report_not_sent();

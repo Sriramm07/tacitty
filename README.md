@@ -47,6 +47,10 @@ surfers. taciTTY lets you type a short, memorable alias instead. It works at
 ```sh
 # 1. Install (Linux or macOS, x86_64 or ARM64, no root needed)
 curl -fsSL https://raw.githubusercontent.com/Sriramm07/tacitty/main/install.sh | sh
+# …or with Homebrew (macOS/Linux):
+brew install Sriramm07/tap/tacitty
+# …or with Cargo (builds from source; needs the Rust toolchain):
+cargo install tacitty
 
 # 2. Create your vault and turn on auto-start
 tacitty init
@@ -55,12 +59,17 @@ tacitty init
 tacitty add proddb
 ```
 
-Open a new terminal, and use it at any password prompt:
+Open a new terminal — auto-start wraps it for you — and use it at any
+password prompt:
 
 ```console
 $ sudo systemctl restart nginx
 [sudo] password for sriram: @proddb⏎     ← nothing is shown; sudo receives the real password
 ```
+
+> To start taciTTY in your **current** terminal immediately — for example
+> right after installing or upgrading — run `tacitty shell`. New terminals
+> pick it up automatically.
 
 If the vault is locked, taciTTY asks for your master passphrase the first
 time you use an alias. It then stays unlocked, for every terminal, until it

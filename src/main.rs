@@ -1168,6 +1168,14 @@ fn resolve_run_alias(resolver: &mut Resolver, name: &str, trigger: char) -> Resu
 }
 
 fn cmd_shell(command: Vec<String>, autostart: bool) -> Result<i32> {
+    // Someone who got the binary from a system-wide install (e.g. one root put
+    // in /usr/local/bin) and runs `tacitty shell` before creating their own
+    // vault would otherwise get a wrapped shell where aliases silently do
+    // nothing. Nudge them to `tacitty init`. Never during autostart, which
+    // runs on every new terminal and must stay silent — only an explicit call.
+    if !autostart && sys::isatty(2) && config::vault_path().is_ok_and(|v| !v.exists()) {
+        eprintln!("tacitty: no vault yet — run `tacitty init` to store and use aliases");
+    }
     let result = load_config().and_then(|cfg| {
         let opts = RunOptions {
             command: if command.is_empty() {

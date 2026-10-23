@@ -673,15 +673,16 @@ fn deliver(
                 ring_local_bell();
                 // Without feedback a mistyped alias looks like a hang: the
                 // Enter was captured (never sent to the auth program), so the
-                // prompt is still waiting. Say so, and leave the prompt live
-                // so the user can just type the right alias (or their real
-                // password) again — no wasted auth attempt.
-                let mut msg = Vec::with_capacity(alias.len() + 48);
-                msg.extend_from_slice(b"\r\ntacitty: no such alias \"");
-                msg.push(cfg.trigger_byte());
-                msg.extend_from_slice(alias.as_bytes());
-                msg.extend_from_slice(b"\" \xe2\x80\x94 try again\r\n");
-                write_stdout(&msg);
+                // prompt is still waiting. Give visible feedback and leave the
+                // prompt live so the user can retype immediately.
+                //
+                // The message is deliberately GENERIC: the captured bytes were
+                // typed at a hidden password prompt, so they may be real secret
+                // material (e.g. a password that happens to start with `@`).
+                // Echoing the alias name would print that to the screen and
+                // scrollback, defeating the whole point of the tool. Never
+                // render captured input here.
+                write_stdout(b"\r\ntacitty: no such alias \xe2\x80\x94 try again\r\n");
             }
             crate::config::OnMiss::Literal => {
                 if !still_valid() {

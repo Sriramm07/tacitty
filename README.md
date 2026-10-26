@@ -179,4 +179,4 @@ taciTTY is free and open source, licensed under either of
 
 ---
 
-<sub>Built with AI assistance (Claude).</sub>
+<sub>This code was written by AI (Claude Code) to directions given by Sriram P. It has also been through as thorough a security review as possible — repeated, independent passes with Claude's security review, with the findings fixed.</sub>
